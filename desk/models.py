@@ -81,3 +81,14 @@ class LessonCompletion(models.Model):
 class VisitPhoto(models.Model):
     visit = models.OneToOneField(Visit, related_name="photo", on_delete=models.CASCADE)
     image = models.BinaryField(editable=False)
+
+
+class LeadPitch(models.Model):
+    lead = models.ForeignKey(Lead, on_delete=models.CASCADE)
+    category = models.CharField(max_length=20, choices=CATEGORIES)
+    english = models.CharField(max_length=600, blank=True)
+    hindi = models.CharField(max_length=600, blank=True)
+    requested_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=("lead", "category"), name="unique_lead_pitch_category")]

@@ -84,3 +84,12 @@
 .google-preview { margin: 0 0 14px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
 .google-preview .details { margin: 0 0 8px; }
 .google-preview dd { overflow-wrap: anywhere; }
+
+.previsit-pitch { margin-bottom: 16px; padding: 16px; border: 1px solid #cadfd5; border-radius: 12px; background: #f0f8f3; }
+.previsit-pitch > h2 { margin-bottom: 10px; }
+.pitch-languages { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.pitch-languages > div { min-width: 0; padding: 12px; border-radius: 8px; background: #fff; }
+.pitch-languages p { margin: 0; overflow-wrap: anywhere; }
+@media (max-width: 650px) {
+  .pitch-languages { grid-template-columns: minmax(0, 1fr); }
+}

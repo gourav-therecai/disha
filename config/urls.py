@@ -11,6 +11,7 @@ urlpatterns = [
     path("api/session", views.session),
     path("api/maps-config", views.maps_config),
     path("api/workspace", views.workspace),
+    path("api/leads/<uuid:lead_id>/pitch", views.lead_pitch),
     path("api/visits/<uuid:visit_id>/photo", views.visit_photo),
     path("maps-and-data", TemplateView.as_view(template_name="maps_and_data.html"), name="maps-data"),
 ]

@@ -150,3 +150,47 @@ class WorkspaceTests(TestCase):
         other.force_login(get_user_model().objects.create_user("other-photo-user"))
         self.assertEqual(other.get(url).status_code, 404)
         self.assertEqual(Client().get(url).status_code, 404)
+
+    def test_pitch_is_owner_scoped_and_reuses_generated_copy(self):
+        from unittest.mock import patch
+
+        state = self.state()
+        self.add_lead(state)
+        self.assertEqual(self.put(state).status_code, 200)
+        url = f"/api/leads/{self.lead_id}/pitch"
+        other = Client()
+        other.force_login(get_user_model().objects.create_user("other-pitch-user"))
+        self.assertEqual(other.post(url).status_code, 404)
+        self.assertEqual(Client().post(url).status_code, 401)
+        expected = {"english": "How do you receive payments?", "hindi": "आप भुगतान कैसे लेते हैं?"}
+
+        with self.settings(OPENAI_API_KEY=""), patch("desk.views.generate_pitch") as generate:
+            self.assertEqual(self.client.post(url).status_code, 503)
+            generate.assert_not_called()
+        with self.settings(OPENAI_API_KEY="test-only"), patch("desk.views.generate_pitch", return_value=expected) as generate:
+            self.assertEqual(self.client.post(url).json(), expected)
+            self.assertEqual(self.client.post(url).json(), expected)
+            generate.assert_called_once_with("Retail")
+        with self.settings(OPENAI_API_KEY=""):
+            self.assertEqual(self.client.post(url).json(), expected)
+
+    def test_openai_pitch_request_and_response(self):
+        from io import BytesIO
+        from unittest.mock import patch
+
+        from .pitches import generate_pitch
+
+        content = {"english": "How do you receive payments?", "hindi": "आप भुगतान कैसे लेते हैं?"}
+        response = {"status": "completed", "output": [{
+            "type": "message", "content": [{"type": "output_text", "text": json.dumps(content)}],
+        }]}
+        with self.settings(OPENAI_API_KEY="test-only"), patch(
+            "desk.pitches.urlopen", return_value=BytesIO(json.dumps(response).encode())
+        ) as request:
+            self.assertEqual(generate_pitch("Retail"), content)
+            args, kwargs = request.call_args
+            self.assertEqual(kwargs["timeout"], 12)
+            body = json.loads(args[0].data)
+            self.assertEqual(body["input"], "Business category: Retail")
+            self.assertFalse(body["store"])
+            self.assertTrue(body["text"]["format"]["strict"])

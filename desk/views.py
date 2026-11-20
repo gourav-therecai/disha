@@ -1,6 +1,6 @@
 import json
 import re
-from datetime import date
+from datetime import date, timedelta
 from uuid import UUID
 
 from django.conf import settings
@@ -8,16 +8,17 @@ from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.forms import UserCreationForm
 from django.db import IntegrityError, OperationalError, transaction
-from django.db.models import Exists, OuterRef
+from django.db.models import Exists, OuterRef, Q
 from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_http_methods
 
-from .models import ACTIONS, CATEGORIES, LESSONS, RATINGS, Lead, LessonCompletion, PlanStop, Visit, VisitPhoto, WorkspaceRevision
+from .models import ACTIONS, CATEGORIES, LESSONS, RATINGS, Lead, LeadPitch, LessonCompletion, PlanStop, Visit, VisitPhoto, WorkspaceRevision
 
 from .photos import normalize_visit_photo
+from .pitches import PitchUnavailable, generate_pitch
 
 
 @login_required
@@ -265,3 +266,39 @@ def visit_photo(request, visit_id):
     response = HttpResponse(bytes(photo.image), content_type="image/jpeg")
     response["X-Content-Type-Options"] = "nosniff"
     return response
+
+
+
+@require_http_methods(["POST"])
+@never_cache
+def lead_pitch(request, lead_id):
+    if not request.user.is_authenticated:
+        return error("Sign in to Disha.", 401)
+    lead = get_object_or_404(Lead, pk=lead_id, user=request.user)
+    if lead.category not in dict(CATEGORIES):
+        return error("Select a valid category for this lead.", 400)
+    pitch = LeadPitch.objects.filter(lead=lead, category=lead.category).first()
+    if pitch and pitch.english and pitch.hindi:
+        return JsonResponse({"english": pitch.english, "hindi": pitch.hindi})
+    if not settings.OPENAI_API_KEY:
+        return error("Add OPENAI_API_KEY to the server .env and restart Disha to generate pitches.", 503)
+
+    if pitch is None:
+        pitch, _ = LeadPitch.objects.get_or_create(lead=lead, category=lead.category)
+    now = timezone.now()
+    available = LeadPitch.objects.filter(pk=pitch.pk, english="", hindi="")
+    claimed = available.filter(
+        Q(requested_at__isnull=True) | Q(requested_at__lt=now - timedelta(seconds=45))
+    ).update(requested_at=now)
+    if not claimed:
+        pitch.refresh_from_db()
+        if pitch.english and pitch.hindi:
+            return JsonResponse({"english": pitch.english, "hindi": pitch.hindi})
+        return error("A pitch request is already in progress or recently failed. Try again shortly.", 429)
+    try:
+        result = generate_pitch(lead.category)
+    except PitchUnavailable:
+        return error("OpenAI could not generate this pitch. Check the API key and quota, then try again.", 502)
+    if not available.filter(requested_at=now).update(**result):
+        return error("This pitch request was superseded. Try again.", 409)
+    return JsonResponse(result)

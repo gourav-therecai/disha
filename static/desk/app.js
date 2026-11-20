@@ -177,6 +177,28 @@ function populateGoogleDetails(lead,id) {
   if(host.isConnected) host.textContent='Google listing details are temporarily unavailable.';
  });
 }
+const pendingPitches=new Map();
+function pitchPanel(id) {
+ return '<section class="previsit-pitch" data-pitch-id="'+id+'"><h2>Pre-visit pitch</h2><div class="pitch-result" aria-live="polite"></div></section>';
+}
+function readPitch(host,id) {
+ if(!host||!id) return;
+ const result=host.querySelector('.pitch-result');
+ result.textContent='Preparing your English and Hindi pitch…';
+ if(!pendingPitches.has(id)) {
+  const request=api('/api/leads/'+encodeURIComponent(id)+'/pitch',{method:'POST',headers:{'X-CSRFToken':csrf}});
+  pendingPitches.set(id,request);
+  request.then(()=>pendingPitches.delete(id),()=>pendingPitches.delete(id));
+ }
+ pendingPitches.get(id).then(pitch=>{
+  if(!host.isConnected||!result.isConnected) return;
+  result.innerHTML='<div class="pitch-languages"><div lang="en"><h3>English</h3><p>'+safe(pitch.english)+
+   '</p></div><div lang="hi"><h3>हिन्दी</h3><p>'+safe(pitch.hindi)+'</p></div></div>';
+ }).catch(error=>{
+  if(!host.isConnected||!result.isConnected) return;
+  result.innerHTML='<p class="sub">'+safe(error.message)+'</p>'+btn('Retry pitch',{act:'retryPitch',id});
+ });
+}
 function profile(id) {
  const lead=data.leads[id];
  if(!lead) return heading('Lead unavailable','Open the lead list to choose an establishment.',btn('Leads',{go:'leads'}));
@@ -191,7 +213,7 @@ function profile(id) {
  if(tab==='Visit history'||tab==='Notes') content='<section class="card pad">'+section(tab)+(history.map(v=>'<div class="row"><div class="grow"><strong>'+displayDate(v.date)+'</strong><p style="margin:3px 0">'+safe(v.remarks)+'</p>'+visitPhoto(v)+(v.nextAction||v.followUpDate?'<small>'+safe(v.nextAction)+(v.followUpDate?' · '+displayDate(v.followUpDate):'')+'</small>':'')+'</div>'+badge(v.rating)+'</div>').join('')||empty('Log a visit to add the first entry.'))+'</section>';
  else content='<div class="layout"><section class="card pad">'+section('Business details','',badge(status(lead)))+
  '<dl class="details"><dt>Owner</dt><dd>'+safe(lead.owner||'Not provided')+'</dd><dt>Phone</dt><dd>'+safe(lead.phone||'Not provided')+'</dd><dt>Address</dt><dd>'+safe(lead.area)+'</dd><dt>Category</dt><dd>'+safe(lead.category)+'</dd></dl>'+(lead.googlePlaceId?'<div id="google-business-details" class="sub" aria-live="polite">Loading Google listing…</div>':'')+'<div class="toolbar">'+phone+directions+(!lead.openedAt?btn('Mark account opened',{act:'openAccount',id}):badge('Opened'))+'</div></section><div class="stack"><section class="card pad">'+section('Relationship summary')+(last?'<p>'+safe(last.remarks)+'</p><small>Last visit · '+displayDate(last.date)+'</small>'+visitPhoto(history.find(v=>v.hasPhoto)):empty('No visits recorded yet.'))+'</section><section class="card pad">'+section('Next action')+(last&&(last.nextAction||last.followUpDate)?'<p>'+safe(last.nextAction||'Follow up')+'</p>'+(last.followUpDate?'<small>'+displayDate(last.followUpDate)+'</small>':''):empty('No follow-up scheduled.'))+'</section></div></div>';
- return '<button class="quiet" data-go="leads">All leads</button>'+heading(safe(nameOf(lead)),info(lead))+'<div class="toolbar">'+actions+'</div><div class="toolbar">'+['Overview','Visit history','Notes'].map(t=>'<button class="chip '+(tab===t?'active':'')+'" data-act="profileTab" data-id="'+t+'">'+t+'</button>').join('')+'</div>'+content;
+ return '<button class="quiet" data-go="leads">All leads</button>'+heading(safe(nameOf(lead)),info(lead))+'<div class="toolbar">'+actions+'</div>'+(tab==='Overview'?pitchPanel(id):'')+'<div class="toolbar">'+['Overview','Visit history','Notes'].map(t=>'<button class="chip '+(tab===t?'active':'')+'" data-act="profileTab" data-id="'+t+'">'+t+'</button>').join('')+'</div>'+content;
 }
 function learning() {
  return heading('Learning & Development','Product knowledge, pitch guides and field practice.')+'<div class="toolbar">'+['All','Product Knowledge','Pitch & Visit Guides','Practice','Resources'].map(c=>'<button class="chip '+(c===learnFilter?'active':'')+'" data-act="learnFilter" data-id="'+c+'">'+c+'</button>').join('')+'</div><div class="learn">'+lessons.filter(l=>learnFilter==='All'||l[1]===learnFilter).map(([id,category,title,note,i])=>'<section class="card pad">'+tile(i)+'<small>'+category+'</small><h2>'+title+'</h2><p class="sub">'+note+'</p>'+btn(data.completedLessons.includes(id)?'Review lesson':'Start lesson',{act:'lesson',id,extra:'primary'})+(data.completedLessons.includes(id)?' '+badge('Completed'):'')+'</section>').join('')+'</div>';
@@ -217,7 +239,10 @@ function render() {
   if(!locationRequest) useCurrentLocation();
   else scheduleDiscovery();
  }
- if(page==='lead') populateGoogleDetails(data.leads[id],id);
+ if(page==='lead') {
+  readPitch(main.querySelector('[data-pitch-id]'),id);
+  populateGoogleDetails(data.leads[id],id);
+ }
  if(page==='home') mapCleanup=mountMap(document.querySelector('#map'),nearbyLeads(),icon,{origin,labelText:locationLabel(),mini:true,radius});
 }
 function notify(message) {
@@ -334,7 +359,7 @@ function addLead(existing, linkedPlace) {
 }
 function logVisit(id) {
  dialog('Close visit',safe(nameOf(data.leads[id])),
- '<fieldset><legend>How promising is this lead?</legend><div class="choices">'+['Hot','Warm','Cold'].map(r=>'<label><input type="radio" name="rating" value="'+r+'" required>'+r+'</label>').join('')+'</div></fieldset>'+
+ pitchPanel(id)+ '<fieldset><legend>How promising is this lead?</legend><div class="choices">'+['Hot','Warm','Cold'].map(r=>'<label><input type="radio" name="rating" value="'+r+'" required>'+r+'</label>').join('')+'</div></fieldset>'+
  field('Visit remarks','<textarea name="remarks" rows="3" maxlength="1500" required placeholder="What was discussed?"></textarea>')+
  field('Follow-up date (optional)','<input name="followUpDate" type="date" min="'+day()+'">')+
  field('Next action (optional)','<select name="nextAction"><option value="">Select next action</option><option>Call back</option><option>Share product details</option><option>Revisit business</option><option>Collect documents</option></select>')+field('Business photo (optional, up to 5 MB)','<input name="photo" type="file" accept="image/jpeg,image/png,image/webp">')+submit('Save visit'), f=>{
@@ -343,6 +368,7 @@ function logVisit(id) {
  if(file?.size>5*1024*1024) {modal.querySelector('.form-error').textContent='Choose a photo that is 5 MB or smaller.';return;}
  save(w=>closeVisit(w,visit),'Visit saved.',undefined,file?.size?{file,visitId:visit.id}:undefined);
  });
+ readPitch(modal.querySelector('[data-pitch-id]'),id);
 }
 function showLesson(id) {
  const [,,title,note,,body,question,answers,correct]=lessons.find(l=>l[0]===id);
@@ -358,6 +384,7 @@ document.addEventListener('click',e=>{
  if(go) {navigate(go);return;}
  const actions={
   locate:useCurrentLocation,discoverLive:findPlaces,
+  retryPitch:()=>readPitch(button.closest('[data-pitch-id]'),id),
   savePlace:()=>{const place=places.find(x=>x.id===id);if(place) addLead(undefined,place);},
   fillPosition:()=>{const form=modal.querySelector('form');form.elements.lat.value=origin[0];form.elements.lng.value=origin[1];},
   add:()=>addLead(),editLead:()=>addLead(data.leads[id]),visit:()=>logVisit(id),dismiss:()=>modal.close(),lesson:()=>showLesson(id),
