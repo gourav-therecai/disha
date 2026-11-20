@@ -1,0 +1,6 @@
+{% load static %}
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Disha</title><link rel="stylesheet" href="{% static 'desk/style.css' %}"></head>
+<body><main class="signin"><section class="card pad"><p class="eyebrow">DISHA</p><h1>{% block heading %}{% endblock %}</h1>
+<form method="post">{% csrf_token %}{{ form.as_p }}{% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}<button class="btn primary" type="submit">Continue</button></form>
+{% block extra %}{% endblock %}<a href="{% url 'maps-data' %}">Maps and data</a></section></main></body></html>
