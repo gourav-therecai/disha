@@ -2,4 +2,4 @@
 name = "disha"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["django>=5.2,<5.3", "python-dotenv>=1,<2", "tzdata>=2025.1"]
+dependencies = ["django>=5.2,<5.3", "python-dotenv>=1,<2", "tzdata>=2025.1", "Pillow>=12,<13"]

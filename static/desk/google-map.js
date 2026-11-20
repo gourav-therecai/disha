@@ -103,3 +103,12 @@ export function mountGoogleMap(host,leads,{origin,radius,onSelect,onError}) {
   for(const marker of markers) marker.map=null;
  };
 }
+
+export async function getGooglePlace(googlePlaceId) {
+ const maps=await load(config.key);
+ const {Place}=await maps.importLibrary('places');
+ const place=new Place({id:googlePlaceId});
+ await place.fetchFields({fields:['displayName','formattedAddress','location']});
+ return {name:place.displayName||'',area:place.formattedAddress||'',
+  lat:place.location?.lat(),lng:place.location?.lng()};
+}

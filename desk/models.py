@@ -76,3 +76,8 @@ class LessonCompletion(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=("user", "lesson"), name="unique_user_lesson")]
+
+
+class VisitPhoto(models.Model):
+    visit = models.OneToOneField(Visit, related_name="photo", on_delete=models.CASCADE)
+    image = models.BinaryField(editable=False)

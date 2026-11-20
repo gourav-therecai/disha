@@ -8,13 +8,16 @@ from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.forms import UserCreationForm
 from django.db import IntegrityError, OperationalError, transaction
-from django.http import JsonResponse
-from django.shortcuts import redirect, render
+from django.db.models import Exists, OuterRef
+from django.http import Http404, HttpResponse, JsonResponse
+from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_http_methods
 
-from .models import ACTIONS, CATEGORIES, LESSONS, RATINGS, Lead, LessonCompletion, PlanStop, Visit, WorkspaceRevision
+from .models import ACTIONS, CATEGORIES, LESSONS, RATINGS, Lead, LessonCompletion, PlanStop, Visit, VisitPhoto, WorkspaceRevision
+
+from .photos import normalize_visit_photo
 
 
 @login_required
@@ -72,7 +75,8 @@ def export_workspace(user):
         "id": str(visit.pk), "leadId": str(visit.lead_id), "rating": visit.rating,
         "remarks": visit.remarks, "date": visit.visit_date, "createdAt": visit.created_at,
         "followUpDate": visit.follow_up_date, "nextAction": visit.next_action or None,
-    } for visit in Visit.objects.filter(lead__user=user)]
+        "hasPhoto": visit.has_photo,
+    } for visit in Visit.objects.filter(lead__user=user).annotate(has_photo=Exists(VisitPhoto.objects.filter(visit_id=OuterRef("pk"))))]
     lessons = list(LessonCompletion.objects.filter(user=user).values_list("lesson", flat=True))
     return {"version": 1, "leads": leads, "plans": plans, "visits": visits, "completedLessons": lessons}
 
@@ -132,8 +136,8 @@ def save_leads(user, values, today):
         if opened is None and item["openedAt"]:
             opened = today
         fields = {
-            "name": field(item["name"], 100, True), "category": item["category"],
-            "address": field(item["area"], 140, True), "contact": field(item["owner"], 80),
+            "name": field(item["name"], 100, not google_id), "category": item["category"],
+            "address": field(item["area"], 140, not google_id), "contact": field(item["owner"], 80),
             "phone": phone, "latitude": latitude, "longitude": longitude,
             "google_place_id": google_id, "opened_on": opened,
         }
@@ -146,6 +150,7 @@ def save_leads(user, values, today):
 
 
 def save_visits(user, visits, lead_ids, today):
+    created = set()
     existing = set(str(pk) for pk in Visit.objects.filter(lead__user=user).values_list("pk", flat=True))
     seen = set()
     for visit in visits:
@@ -164,8 +169,10 @@ def save_visits(user, visits, lead_ids, today):
         Visit.objects.create(pk=identifier, lead_id=visit["leadId"], rating=rating,
                              remarks=field(visit["remarks"], 1500, True), visit_date=today,
                              follow_up_date=follow_up, next_action=action)
+        created.add(identifier)
     if not existing.issubset(seen):
         raise ValueError("The workspace is missing visit history.")
+    return created
 
 
 def save_plan(user, plans, lead_ids):
@@ -187,7 +194,7 @@ def save_plan(user, plans, lead_ids):
         PlanStop.objects.filter(user=user, pk__in=[item.pk for item in existing.values()]).delete()
 
 
-@require_http_methods(["GET", "PUT"])
+@require_http_methods(["GET", "PUT", "POST"])
 @never_cache
 def workspace(request):
     user = request.user
@@ -197,10 +204,17 @@ def workspace(request):
         with transaction.atomic():
             revision = WorkspaceRevision.objects.filter(user=user).values_list("revision", flat=True).first() or 0
             return JsonResponse({"revision": revision, "data": export_workspace(user)})
-    if request.content_type != "application/json":
-        return error("Use JSON when saving the workspace.", 415)
     try:
-        payload = json.loads(request.body)
+        photo = None
+        photo_visit = None
+        if request.method == "POST" and request.content_type == "multipart/form-data":
+            payload = json.loads(request.POST["payload"])
+            photo_visit = valid_uuid(request.POST["photo_visit"])
+            photo = normalize_visit_photo(request.FILES["photo"])
+        elif request.method == "PUT" and request.content_type == "application/json":
+            payload = json.loads(request.body)
+        else:
+            return error("Use JSON or the visit photo upload form.", 415)
         revision = payload["revision"]
         state = payload["data"]
         leads, plans, visits, lessons = (state[key] for key in ("leads", "plans", "visits", "completedLessons"))
@@ -216,7 +230,11 @@ def workspace(request):
                 return error("Workspace changed in another tab. Refresh and retry.", 409)
             today = timezone.localdate()
             save_leads(user, leads, today)
-            save_visits(user, visits, leads.keys(), today)
+            created_visits = save_visits(user, visits, leads.keys(), today)
+            if photo is not None:
+                if photo_visit not in created_visits:
+                    raise ValueError("Attach a photo to a new visit.")
+                VisitPhoto.objects.create(visit_id=photo_visit, image=photo)
             save_plan(user, plans, leads.keys())
             existing_lessons = set(LessonCompletion.objects.filter(user=user).values_list("lesson", flat=True))
             submitted = payload.get("quiz") or {}
@@ -235,3 +253,15 @@ def workspace(request):
         if "locked" not in str(exc).lower():
             raise
         return error("Workspace changed in another tab. Refresh and retry.", 409)
+
+
+
+@require_http_methods(["GET", "HEAD"])
+@never_cache
+def visit_photo(request, visit_id):
+    if not request.user.is_authenticated:
+        raise Http404
+    photo = get_object_or_404(VisitPhoto, visit_id=visit_id, visit__lead__user=request.user)
+    response = HttpResponse(bytes(photo.image), content_type="image/jpeg")
+    response["X-Content-Type-Options"] = "nosniff"
+    return response

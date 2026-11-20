@@ -102,3 +102,51 @@ class WorkspaceTests(TestCase):
         saved = self.put(state)
         self.assertEqual(saved.status_code, 200)
         self.assertEqual(saved.json()["data"]["completedLessons"], ["products"])
+
+    def test_google_link_can_save_without_copying_listing_details(self):
+        state = self.state()
+        self.add_lead(state)
+        state["data"]["leads"][self.lead_id].update(
+            name="", area="", lat=None, lng=None, googlePlaceId="ChIJExample"
+        )
+        response = self.put(state)
+        self.assertEqual(response.status_code, 200)
+        result = response.json()["data"]["leads"][self.lead_id]
+        self.assertEqual(result["googlePlaceId"], "ChIJExample")
+        self.assertEqual(result["name"], "")
+        self.assertIsNone(result["lat"])
+
+    def test_visit_photo_is_optional_private_and_validated(self):
+        from io import BytesIO
+
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from PIL import Image
+
+        state = self.state()
+        self.add_lead(state)
+        visit = self.visit()
+        state["data"]["visits"] = [visit]
+        url = f"/api/visits/{visit['id']}/photo"
+        rejected = self.client.post(self.url, {
+            "payload": json.dumps(state), "photo_visit": visit["id"],
+            "photo": SimpleUploadedFile("not-an-image.png", b"<html>no</html>"),
+        })
+        self.assertEqual(rejected.status_code, 400)
+        self.assertFalse(Visit.objects.exists())
+
+        image = BytesIO()
+        Image.new("RGB", (12, 12), "green").save(image, format="PNG")
+        saved = self.client.post(self.url, {
+            "payload": json.dumps(state), "photo_visit": visit["id"],
+            "photo": SimpleUploadedFile("business.png", image.getvalue()),
+        })
+        self.assertEqual(saved.status_code, 200)
+        self.assertTrue(saved.json()["data"]["visits"][0]["hasPhoto"])
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "image/jpeg")
+        self.assertIn("no-store", response["Cache-Control"])
+        other = Client()
+        other.force_login(get_user_model().objects.create_user("other-photo-user"))
+        self.assertEqual(other.get(url).status_code, 404)
+        self.assertEqual(Client().get(url).status_code, 404)

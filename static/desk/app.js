@@ -1,6 +1,6 @@
 import {categories,day,closeVisit,distance,center} from './store.js';
 import {mountMap} from './map.js';
-import {configureGoogleMaps,googleConfigured,searchGoogle,mountGoogleMap} from './google-map.js';
+import {configureGoogleMaps,googleConfigured,searchGoogle,mountGoogleMap,getGooglePlace} from './google-map.js';
 
 const paths={
  grid:'M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z',
@@ -20,6 +20,7 @@ const paths={
  compass:'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z m16 8-2 6-6 2 2-6z'
 };
 const icon=(name)=>'<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="'+(paths[name]||paths.pin)+'"/></svg>';
+const nameOf=lead=>lead.name||'Google business · '+lead.category;
 const safe=(value)=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const nav=[['home','Home','grid'],['discover','Discover','pin'],['plan','My Plan','calendar'],['leads','Leads','users'],['learn','Learn','book'],['reports','Reports','chart']];
 const lessons=[
@@ -77,13 +78,13 @@ const status=(lead)=>lead.openedAt?'Opened':latest(lead.id)?.rating||'Fresh';
 const plan=(date=day())=>data.plans[date]||[];
 const visits=(date=day())=>data.visits.filter(v=>v.date===date);
 const visited=(id,date=day())=>visits(date).some(v=>v.leadId===id);
-const leadTitle=(lead)=>'<button class="lead-link" data-go="lead/'+lead.id+'">'+safe(lead.name)+'</button>';
+const leadTitle=(lead)=>'<button class="lead-link" data-go="lead/'+lead.id+'">'+safe(nameOf(lead))+'</button>';
 const km=(lead)=>lead.lat===null?null:distance(lead.lat,lead.lng,origin);
 const nearbyLeads=()=>Object.values(data.leads).filter(l=>km(l)!==null&&km(l)<=radius);
 const firstName=()=>safe(user.name.split(/[ @]/)[0]||'there');
 const initials=()=>safe(user.name.trim().split(/\s+/).slice(0,2).map(part=>part[0]).join('').toUpperCase());
 const distanceLabel=(lead)=>km(lead)===null?'':' · '+km(lead).toFixed(1)+' km';
-const info=(lead)=>safe(lead.category)+' · '+safe(lead.area)+'<span data-distance="'+lead.id+'">'+distanceLabel(lead)+'</span>';
+const info=(lead)=>safe(lead.category)+' · '+safe(lead.area||(lead.googlePlaceId?'Google Maps':''))+'<span data-distance="'+lead.id+'">'+distanceLabel(lead)+'</span>';
 const row=(lead,action='',pill=true)=>'<div class="row">'+tile(...kind[lead.category])+'<div class="grow"><strong>'+leadTitle(lead)+'</strong><small>'+info(lead)+'</small></div>'+(pill?badge(status(lead)):'')+action+'</div>';
 const heading=(title,description,action='')=>'<div class="section heading"><div><h1>'+title+'</h1><div class="sub">'+description+'</div></div>'+action+'</div>';
 const empty=(message)=>'<div class="empty">'+message+'</div>';
@@ -116,7 +117,11 @@ function updateResults(discover) {
  if(discover) for(const place of places) {
   const index=available.findIndex(lead=>lead.googlePlaceId===place.googlePlaceId);
   if(index<0) available.push(place);
-  else if(available[index].lat===null) available[index]={...available[index],lat:place.lat,lng:place.lng};
+  else {
+   const lead=available[index];
+   available[index]={...lead,name:lead.name||place.name,area:lead.area||place.area,
+    lat:lead.lat??place.lat,lng:lead.lng??place.lng};
+  }
  }
  const match=available.filter(l=>(category==='All'||category===l.category)&&[l.name,l.area,l.category].join(' ').toLowerCase().includes(query.trim().toLowerCase())&&(!discover||(km(l)!==null&&km(l)<=radius)));
  if(discover) match.sort((a,b)=>km(a)-km(b));
@@ -144,11 +149,33 @@ function updateResults(discover) {
 function planner() {
  const ids=plan(planDate),done=ids.filter(id=>visited(id,planDate)).length;
  const available=Object.values(data.leads).filter(lead=>!ids.includes(lead.id));
- const options=available.map(lead=>'<option value="'+lead.id+'">'+safe(lead.name)+'</option>').join('');
+ const options=available.map(lead=>'<option value="'+lead.id+'">'+safe(nameOf(lead))+'</option>').join('');
  const addStop=options?'<label for="planLead">Add a saved lead</label><div class="toolbar"><select id="planLead">'+options+'</select>'+btn('Add stop',{act:'planAddSelected'})+'</div>':'';
  return heading('My Plan','Organise stops and track category coverage.',btn('Discover leads',{go:'discover',extra:'primary'}))+'<div class="toolbar"><input style="width:auto" type="date" id="planDate" aria-label="Plan date" value="'+planDate+'"></div><div class="layout"><section class="card pad">'+section(displayDate(planDate),done+' of '+ids.length+' stops complete')+addStop+
  (ids.map(id=>row(data.leads[id],visitButton(id,planDate)+(!visited(id,planDate)?btn('Remove',{act:'planRemove',id}):''),false)).join('')||empty('There are no visits planned for this date.'))+'</section><section class="card pad">'+section('Category coverage','Distinct planned stops by business category')+
  categories.map(c=>'<div class="row"><span class="grow">'+c+'</span><strong>'+ids.filter(id=>data.leads[id].category===c).length+'</strong></div>').join('')+'</section></div>';
+}
+function visitPhoto(visit) {
+ return visit?.hasPhoto?'<img class="visit-photo" loading="lazy" alt="Business photo from this visit" src="/api/visits/'+encodeURIComponent(visit.id)+'/photo">':'';
+}
+function googleFields(place,category,asForm=false) {
+ const entries=[['Business name',place.name],['Address',place.area],['Latitude',place.lat],['Longitude',place.lng]];
+ if(category) entries.push(['Category',category]);
+ return '<div class="google-preview"><dl class="details">'+entries.map(([label,value])=>
+  '<dt>'+label+'</dt><dd>'+(asForm?'<input readonly aria-label="'+label+'" value="'+safe(value??'Unavailable')+'">':safe(value??'Unavailable'))+'</dd>').join('')+'</dl><small>Source: Google Maps</small></div>';
+}
+function populateGoogleDetails(lead,id) {
+ const host=document.querySelector('#google-business-details');
+ if(!host||!lead?.googlePlaceId) return;
+ if(!googleConfigured()) {host.textContent='Google Maps is not configured on this device.';return;}
+ getGooglePlace(lead.googlePlaceId).then(place=>{
+  if(!host.isConnected||location.hash!=='#lead/'+id) return;
+  host.innerHTML=googleFields(place);
+  const title=main.querySelector('h1');
+  if(title&&!lead.name&&place.name) title.textContent=place.name;
+ }).catch(()=>{
+  if(host.isConnected) host.textContent='Google listing details are temporarily unavailable.';
+ });
 }
 function profile(id) {
  const lead=data.leads[id];
@@ -156,15 +183,15 @@ function profile(id) {
  const history=data.visits.filter(v=>v.leadId===id).slice().reverse(),last=history[0];
  const actions=btn('Edit details',{act:'editLead',id})+' '+btn('Log visit',{act:'visit',id,extra:'primary'})+(plan().includes(id)?' '+badge('Planned'):' '+btn('Add to plan',{act:'planAdd',id}));
  const mapLink=lead.googlePlaceId
-  ? 'https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(lead.name)+'&query_place_id='+encodeURIComponent(lead.googlePlaceId)
+  ? 'https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(lead.name||'Google business')+'&query_place_id='+encodeURIComponent(lead.googlePlaceId)
   : lead.lat===null?'':'https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(lead.lat+','+lead.lng);
  const directions=mapLink?'<a class="btn" target="_blank" rel="noopener" href="'+safe(mapLink)+'">Open location</a>':'';
  const phone=lead.phone?'<a class="btn" href="tel:'+safe(lead.phone)+'">Call</a>':'';
  let content;
- if(tab==='Visit history'||tab==='Notes') content='<section class="card pad">'+section(tab)+(history.map(v=>'<div class="row"><div class="grow"><strong>'+displayDate(v.date)+'</strong><p style="margin:3px 0">'+safe(v.remarks)+'</p>'+(v.nextAction||v.followUpDate?'<small>'+safe(v.nextAction)+(v.followUpDate?' · '+displayDate(v.followUpDate):'')+'</small>':'')+'</div>'+badge(v.rating)+'</div>').join('')||empty('Log a visit to add the first entry.'))+'</section>';
+ if(tab==='Visit history'||tab==='Notes') content='<section class="card pad">'+section(tab)+(history.map(v=>'<div class="row"><div class="grow"><strong>'+displayDate(v.date)+'</strong><p style="margin:3px 0">'+safe(v.remarks)+'</p>'+visitPhoto(v)+(v.nextAction||v.followUpDate?'<small>'+safe(v.nextAction)+(v.followUpDate?' · '+displayDate(v.followUpDate):'')+'</small>':'')+'</div>'+badge(v.rating)+'</div>').join('')||empty('Log a visit to add the first entry.'))+'</section>';
  else content='<div class="layout"><section class="card pad">'+section('Business details','',badge(status(lead)))+
- '<dl class="details"><dt>Owner</dt><dd>'+safe(lead.owner||'Not provided')+'</dd><dt>Phone</dt><dd>'+safe(lead.phone||'Not provided')+'</dd><dt>Address</dt><dd>'+safe(lead.area)+'</dd><dt>Category</dt><dd>'+safe(lead.category)+'</dd></dl><div class="toolbar">'+phone+directions+(!lead.openedAt?btn('Mark account opened',{act:'openAccount',id}):badge('Opened'))+'</div></section><div class="stack"><section class="card pad">'+section('Relationship summary')+(last?'<p>'+safe(last.remarks)+'</p><small>Last visit · '+displayDate(last.date)+'</small>':empty('No visits recorded yet.'))+'</section><section class="card pad">'+section('Next action')+(last&&(last.nextAction||last.followUpDate)?'<p>'+safe(last.nextAction||'Follow up')+'</p>'+(last.followUpDate?'<small>'+displayDate(last.followUpDate)+'</small>':''):empty('No follow-up scheduled.'))+'</section></div></div>';
- return '<button class="quiet" data-go="leads">All leads</button>'+heading(safe(lead.name),info(lead))+'<div class="toolbar">'+actions+'</div><div class="toolbar">'+['Overview','Visit history','Notes'].map(t=>'<button class="chip '+(tab===t?'active':'')+'" data-act="profileTab" data-id="'+t+'">'+t+'</button>').join('')+'</div>'+content;
+ '<dl class="details"><dt>Owner</dt><dd>'+safe(lead.owner||'Not provided')+'</dd><dt>Phone</dt><dd>'+safe(lead.phone||'Not provided')+'</dd><dt>Address</dt><dd>'+safe(lead.area)+'</dd><dt>Category</dt><dd>'+safe(lead.category)+'</dd></dl>'+(lead.googlePlaceId?'<div id="google-business-details" class="sub" aria-live="polite">Loading Google listing…</div>':'')+'<div class="toolbar">'+phone+directions+(!lead.openedAt?btn('Mark account opened',{act:'openAccount',id}):badge('Opened'))+'</div></section><div class="stack"><section class="card pad">'+section('Relationship summary')+(last?'<p>'+safe(last.remarks)+'</p><small>Last visit · '+displayDate(last.date)+'</small>'+visitPhoto(history.find(v=>v.hasPhoto)):empty('No visits recorded yet.'))+'</section><section class="card pad">'+section('Next action')+(last&&(last.nextAction||last.followUpDate)?'<p>'+safe(last.nextAction||'Follow up')+'</p>'+(last.followUpDate?'<small>'+displayDate(last.followUpDate)+'</small>':''):empty('No follow-up scheduled.'))+'</section></div></div>';
+ return '<button class="quiet" data-go="leads">All leads</button>'+heading(safe(nameOf(lead)),info(lead))+'<div class="toolbar">'+actions+'</div><div class="toolbar">'+['Overview','Visit history','Notes'].map(t=>'<button class="chip '+(tab===t?'active':'')+'" data-act="profileTab" data-id="'+t+'">'+t+'</button>').join('')+'</div>'+content;
 }
 function learning() {
  return heading('Learning & Development','Product knowledge, pitch guides and field practice.')+'<div class="toolbar">'+['All','Product Knowledge','Pitch & Visit Guides','Practice','Resources'].map(c=>'<button class="chip '+(c===learnFilter?'active':'')+'" data-act="learnFilter" data-id="'+c+'">'+c+'</button>').join('')+'</div><div class="learn">'+lessons.filter(l=>learnFilter==='All'||l[1]===learnFilter).map(([id,category,title,note,i])=>'<section class="card pad">'+tile(i)+'<small>'+category+'</small><h2>'+title+'</h2><p class="sub">'+note+'</p>'+btn(data.completedLessons.includes(id)?'Review lesson':'Start lesson',{act:'lesson',id,extra:'primary'})+(data.completedLessons.includes(id)?' '+badge('Completed'):'')+'</section>').join('')+'</div>';
@@ -190,6 +217,7 @@ function render() {
   if(!locationRequest) useCurrentLocation();
   else scheduleDiscovery();
  }
+ if(page==='lead') populateGoogleDetails(data.leads[id],id);
  if(page==='home') mapCleanup=mountMap(document.querySelector('#map'),nearbyLeads(),icon,{origin,labelText:locationLabel(),mini:true,radius});
 }
 function notify(message) {
@@ -202,7 +230,7 @@ async function api(path,options) {
  if(!response.ok) throw Object.assign(new Error(body.error||'Request failed.'),{status:response.status});
  return body;
 }
-async function save(change,message,quiz) {
+async function save(change,message,quiz,attachment) {
  if(saving) return false;
  saving=true;
  const form=modal.open?modal.querySelector('form'):null;
@@ -211,7 +239,16 @@ async function save(change,message,quiz) {
  try {
   const next=structuredClone(data);
   change(next);
-  const result=await api('/api/workspace',{method:'PUT',headers:{'Content-Type':'application/json','X-CSRFToken':csrf},body:JSON.stringify({revision,data:next,quiz})});
+  const payload=JSON.stringify({revision,data:next,quiz});
+  const headers={'X-CSRFToken':csrf};
+  let method='PUT',body=payload;
+  if(attachment) {
+   method='POST';body=new FormData();
+   body.append('payload',payload);
+   body.append('photo_visit',attachment.visitId);
+   body.append('photo',attachment.file);
+  } else headers['Content-Type']='application/json';
+  const result=await api('/api/workspace',{method,headers,body});
   ({data,revision}=result);
   if(modal.open) modal.close();
   render();notify(message);return true;
@@ -276,16 +313,19 @@ function dialog(title,description,body,method) {
 }
 function addLead(existing, linkedPlace) {
  const val=(key)=>safe(existing?.[key]??'');
- dialog(existing?'Edit business details':linkedPlace?'Link Google place as a lead':'Add a new lead',linkedPlace?'Enter your own business details. Disha only saves the Google Place ID from the listing.':'Enter business details. Add coordinates to place the business on the map.',
- field('Business name','<input name="name" value="'+val('name')+'" maxlength="100" required>')+
+ const isLinked=Boolean(existing?.googlePlaceId||linkedPlace);
+ const required=isLinked?'':' required';
+ dialog(existing?'Edit business details':linkedPlace?'Link Google place as a lead':'Add a new lead',linkedPlace?'Google Maps has filled the listing details below. Save to link this business. Add a local label or contact details if useful.':'Enter business details. Add coordinates to place the business on the map.',
+ (linkedPlace?googleFields(linkedPlace,linkedPlace.category,true):'')+
+ field(isLinked?'Local business label (optional)':'Business name','<input name="name" value="'+val('name')+'" maxlength="100"'+required+'>')+
  field('Category','<select name="category">'+categories.map(c=>'<option '+((existing?.category||linkedPlace?.category||category)===c?'selected':'')+'>'+c+'</option>').join('')+'</select>')+
- field('Address or area','<input name="area" value="'+val('area')+'" maxlength="140" required>')+
+ field(isLinked?'Your address notes (optional)':'Address or area','<input name="area" value="'+val('area')+'" maxlength="140"'+required+'>')+
  field('Owner','<input name="owner" value="'+val('owner')+'" maxlength="80">')+
  field('Phone','<input name="phone" value="'+val('phone')+'" type="tel" maxlength="24">')+
- field('Latitude','<input name="lat" value="'+val('lat')+'" type="number" step="any" min="-85" max="85">')+
- field('Longitude','<input name="lng" value="'+val('lng')+'" type="number" step="any" min="-180" max="180">')+(locationMode==='live'?btn('Use my current position for this business',{act:'fillPosition'}):'')+submit('Save lead'),async f=>{
- const vals=Object.fromEntries([...f].map(([k,v])=>[k,v.trim()]));
- if(!vals.name||!vals.area||Boolean(vals.lat)!==Boolean(vals.lng)||!/^[+0-9 ()-]*$/.test(vals.phone)) {
+ (linkedPlace?'':field('Latitude','<input name="lat" value="'+val('lat')+'" type="number" step="any" min="-85" max="85">')+
+ field('Longitude','<input name="lng" value="'+val('lng')+'" type="number" step="any" min="-180" max="180">')+(locationMode==='live'?btn('Use my current position for this business',{act:'fillPosition'}):''))+submit('Save lead'),async f=>{
+ const vals={lat:'',lng:'',...Object.fromEntries([...f].map(([k,v])=>[k,v.trim()]))};
+ if((!isLinked&&(!vals.name||!vals.area))||Boolean(vals.lat)!==Boolean(vals.lng)||!/^[+0-9 ()-]*$/.test(vals.phone)) {
   modal.querySelector('.form-error').textContent='Enter a name, address, valid phone if provided, and both coordinates or neither.';return;
  }
  const id=existing?.id||crypto.randomUUID();
@@ -293,13 +333,15 @@ function addLead(existing, linkedPlace) {
  });
 }
 function logVisit(id) {
- dialog('Close visit',safe(data.leads[id].name),
+ dialog('Close visit',safe(nameOf(data.leads[id])),
  '<fieldset><legend>How promising is this lead?</legend><div class="choices">'+['Hot','Warm','Cold'].map(r=>'<label><input type="radio" name="rating" value="'+r+'" required>'+r+'</label>').join('')+'</div></fieldset>'+
  field('Visit remarks','<textarea name="remarks" rows="3" maxlength="1500" required placeholder="What was discussed?"></textarea>')+
  field('Follow-up date (optional)','<input name="followUpDate" type="date" min="'+day()+'">')+
- field('Next action (optional)','<select name="nextAction"><option value="">Select next action</option><option>Call back</option><option>Share product details</option><option>Revisit business</option><option>Collect documents</option></select>')+submit('Save visit'), f=>{
+ field('Next action (optional)','<select name="nextAction"><option value="">Select next action</option><option>Call back</option><option>Share product details</option><option>Revisit business</option><option>Collect documents</option></select>')+field('Business photo (optional, up to 5 MB)','<input name="photo" type="file" accept="image/jpeg,image/png,image/webp">')+submit('Save visit'), f=>{
  const visit={id:crypto.randomUUID(),leadId:id,date:day(),createdAt:new Date().toISOString(),rating:f.get('rating'),remarks:f.get('remarks').trim(),followUpDate:f.get('followUpDate')||null,nextAction:f.get('nextAction')||null};
- save(w=>closeVisit(w,visit),'Visit saved.');
+ const file=f.get('photo');
+ if(file?.size>5*1024*1024) {modal.querySelector('.form-error').textContent='Choose a photo that is 5 MB or smaller.';return;}
+ save(w=>closeVisit(w,visit),'Visit saved.',undefined,file?.size?{file,visitId:visit.id}:undefined);
  });
 }
 function showLesson(id) {
@@ -322,7 +364,7 @@ document.addEventListener('click',e=>{
   planAdd:()=>save(w=>{const date=day();const ids=w.plans[date]??=[];if(!ids.includes(id)) ids.push(id);},'Added to today’s plan.'),
   planAddSelected:()=>{const choice=document.querySelector('#planLead')?.value;if(choice) save(w=>{const ids=w.plans[planDate]??=[];if(!ids.includes(choice)) ids.push(choice);},'Stop added to plan.');},
   planRemove:()=>save(w=>{w.plans[planDate]=(w.plans[planDate]||[]).filter(x=>x!==id);},'Removed from plan.'),
-  openAccount:()=>dialog('Mark account opened',safe(data.leads[id].name),'<p>Record the account opening for today.</p>'+submit('Confirm opening'),()=>save(w=>{w.leads[id].openedAt=day();},'Account opening recorded.')),
+  openAccount:()=>dialog('Mark account opened',safe(nameOf(data.leads[id])),'<p>Record the account opening for today.</p>'+submit('Confirm opening'),()=>save(w=>{w.leads[id].openedAt=day();},'Account opening recorded.')),
   category:()=>{if(category===id) return;category=id;clearDiscovery();for(const chip of main.querySelectorAll('[data-act="category"]')) {chip.classList.toggle('active',chip.dataset.id===id);chip.setAttribute('aria-pressed',String(chip.dataset.id===id));}updateResults(location.hash==='#discover');scheduleDiscovery();},profileTab:()=>{tab=id;render();},learnFilter:()=>{learnFilter=id;render();}
  };
  actions[act]?.();
