@@ -16,7 +16,7 @@ from django.utils import timezone
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_http_methods
 
-from .models import ACTIONS, BusinessAllocation, CATEGORIES, LESSONS, RATINGS, Lead, LeadPitch, LessonCompletion, PitchProduct, PlanStop, Visit, VisitPhoto, WorkspaceRevision
+from .models import ACTIONS, BusinessAllocation, CATEGORIES, LESSONS, RATINGS, Lead, LeadPitch, LessonCompletion, PitchProduct, PlanStop, Visit, Territory, VisitPhoto, WorkspaceRevision
 
 from .allocations import AllocationConflict, allocation_key
 from .photos import normalize_visit_photo
@@ -368,3 +368,23 @@ def beat_availability(request):
     keys = {item: allocation_key(item, "", "") for item in ids}
     blocked = blocked_allocation_keys(request.user, keys.values())
     return JsonResponse({"unavailable": [item for item in keys if keys[item] in blocked]})
+
+
+@require_http_methods(["GET", "POST"])
+@never_cache
+def territories(request):
+    if not request.user.is_authenticated:
+        return error("Sign in to Disha.", 401)
+    if request.method == "POST":
+        try:
+            payload = json.loads(request.body)
+            area = field(payload["area"], 120, True)
+            radius = payload["radius"]
+            if type(radius) is not int or radius not in (1, 2, 5):
+                raise ValueError
+        except (ValueError, TypeError, KeyError):
+            return error("Enter a territory area and a valid radius.", 400)
+        Territory.objects.update_or_create(user=request.user, area=area, defaults={"radius": radius})
+    return JsonResponse({"territories": list(
+        Territory.objects.filter(user=request.user).values("id", "area", "radius")
+    )})

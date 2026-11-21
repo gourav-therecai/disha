@@ -104,13 +104,16 @@ export function mountGoogleMap(host,leads,{origin,radius,onSelect,onError}) {
  };
 }
 
-export async function getGooglePlace(googlePlaceId) {
+export async function getGooglePlace(googlePlaceId,withHours=false) {
  const maps=await load(config.key);
  const {Place}=await maps.importLibrary('places');
  const place=new Place({id:googlePlaceId});
- await place.fetchFields({fields:['displayName','formattedAddress','location']});
+ const fields=['displayName','formattedAddress','location'];
+ if(withHours) fields.push('currentOpeningHours','regularOpeningHours','utcOffsetMinutes','businessStatus');
+ await place.fetchFields({fields});
  return {name:place.displayName||'',area:place.formattedAddress||'',
-  lat:place.location?.lat(),lng:place.location?.lng()};
+  lat:place.location?.lat(),lng:place.location?.lng(),
+  ...(withHours?{hours:(place.currentOpeningHours??place.regularOpeningHours)?.periods,utcOffset:place.utcOffsetMinutes,businessStatus:place.businessStatus}:{})};
 }
 
 export async function resolveBeatArea(address) {

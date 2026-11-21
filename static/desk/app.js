@@ -1,7 +1,7 @@
 import {categories,day,closeVisit,distance,center} from './store.js';
 import {mountMap} from './map.js';
 import {configureGoogleMaps,googleConfigured,searchGoogle,getGooglePlace,resolveBeatArea,drawGoogleBeat} from './google-map.js';
-import {arrangeBeat,beatNodes,drawCoordinateBeat,pointOf} from './beat.js';
+import {scheduleBeat,beatNodes,drawCoordinateBeat,pointOf} from './beat.js';
 
 const paths={
  grid:'M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z',
@@ -109,17 +109,52 @@ function updateResults() {
  document.querySelector('#results').innerHTML=section(match.length+(match.length===1?' establishment':' establishments'))+
  (match.map(l=>row(l,btn('Open',{go:'lead/'+l.id}))).join('')||empty('No matching leads. Add a business to get started.'));
 }
-const beatSettings={area:'',target:8,radius:5,category:'All',followups:true};
+const istClock=new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
+const beatSettings={area:'',target:8,radius:5,category:'All',followups:true,start:istClock.format(new Date()),budget:120,engagement:15,speed:20};
+let territories=[];
+const timeLabel=minutes=>String(Math.floor(minutes/60)%24).padStart(2,'0')+':'+String(minutes%60).padStart(2,'0')+(minutes>=1440?' next day':'');
+const territoryOptions=()=>'<option value="">Choose a saved territory</option>'+territories.map(t=>
+ '<option value="'+t.id+'" '+(t.area===beatSettings.area?'selected':'')+'>'+safe(t.area)+'</option>').join('');
+async function loadTerritories() {
+ try {
+  ({territories}=await api('/api/beat/territories'));
+  const select=document.querySelector('#beat-territory');
+  if(select) select.innerHTML=territoryOptions();
+ } catch {setBeatStatus('Saved territories could not be loaded. You can still enter an area.');}
+}
+async function saveTerritory(button) {
+ const form=button.form;
+ const area=form.elements.area.value.trim();
+ const radius=Number(form.elements.radius.value);
+ if(!area) {setBeatStatus('Enter an area to save as a territory.');return;}
+ button.disabled=true;
+ try {
+  ({territories}=await api('/api/beat/territories',{method:'POST',headers:{'X-CSRFToken':csrf,'Content-Type':'application/json'},
+   body:JSON.stringify({area,radius})}));
+  beatSettings.area=area;beatSettings.radius=radius;
+  if(form.isConnected) {
+   form.querySelector('#beat-territory').innerHTML=territoryOptions();
+   setBeatStatus('Territory saved.');
+  }
+ } catch(error) {if(form.isConnected) setBeatStatus(error.message);}
+ finally {button.disabled=false;}
+}
 let beatDraft=null, beatBusy=false, savedRoute=null;
 const beatRoute=()=>['beat','discover','plan'].includes(location.hash.slice(1));
 
 function beatPage() {
  const ids=plan();
  const form='<form id="beat-form" class="card pad beat-form">'+section('Set up today’s beat')+
+  field('Saved territory','<select id="beat-territory">'+territoryOptions()+'</select>')+
   field('Area','<input name="area" maxlength="120" autocomplete="off" placeholder="e.g. Andheri East, Mumbai" value="'+safe(beatSettings.area)+'">')+
-  '<p class="sub" id="beat-location">Leave blank to use your current location.</p>'+btn('Use my location',{act:'locate'})+
+  '<p class="sub" id="beat-location">Leave blank to use your current location.</p>'+'<div class="toolbar">'+btn('Use my location',{act:'locate'})+btn('Save territory',{act:'saveTerritory'})+'</div>'+
   '<div class="beat-fields">'+field('Visit target','<input name="target" type="number" min="1" max="40" value="'+beatSettings.target+'" required>')+
   field('Search radius','<select name="radius">'+[1,2,5].map(n=>'<option value="'+n+'" '+(n===beatSettings.radius?'selected':'')+'>'+n+' km</option>').join('')+'</select>')+'</div>'+
+  '<div class="beat-fields">'+field('Start time (IST)','<input name="start" type="time" value="'+beatSettings.start+'" required>')+
+  field('Time available (min)','<input name="budget" type="number" min="15" max="720" value="'+beatSettings.budget+'" required>')+
+  field('Time per visit (min)','<input name="engagement" type="number" min="5" max="180" value="'+beatSettings.engagement+'" required>')+
+  field('Travel speed (km/h)','<input name="speed" type="number" min="3" max="80" value="'+beatSettings.speed+'" required>')+'</div>'+
+  '<p class="sub">Travel uses straight-line distance and your estimated speed.</p>'+
   field('New business category','<select name="category">'+['All',...categories].map(c=>'<option '+(c===beatSettings.category?'selected':'')+'>'+c+'</option>').join('')+'</select>')+
   '<label class="beat-check"><input type="checkbox" name="followups" '+(beatSettings.followups?'checked':'')+'> Include due and overdue follow-ups</label>'+
   '<button class="btn primary" type="submit">Preview beat</button><p id="beat-status" class="sub" role="status"></p></form>';
@@ -154,7 +189,10 @@ async function previewBeat(form) {
  beatSettings.radius=Number(values.get('radius'));
  beatSettings.category=values.get('category');
  beatSettings.followups=values.has('followups');
- const settings={...beatSettings};
+ beatSettings.start=values.get('start');
+ for(const key of ['budget','engagement','speed']) beatSettings[key]=Number(values.get(key));
+ const [hour,minute]=beatSettings.start.split(':').map(Number);
+ const settings={...beatSettings,startMinute:hour*60+minute,localDay:new Date(day()+'T12:00:00Z').getUTCDay()};
  for(const field of form.elements) field.disabled=true;beatBusy=true;beatDraft=null;savedRoute=null;
  renderBeatPreview();
  setBeatStatus('Finding available businesses…');
@@ -186,13 +224,14 @@ async function previewBeat(form) {
    return Boolean(followUp&&followUp<=day());
   };
   const owned=Object.values(data.leads);
+  const details=new Map();
   // A linked follow-up can be absent from a category-limited nearby search.
   const unresolved=owned.filter(lead=>settings.followups&&googleConfigured()&&areaPoint&&
    lead.googlePlaceId&&!source.has(lead.googlePlaceId)&&!pointOf(lead)&&!lead.allocationBlocked&&
    !visited(lead.id)&&due(lead)).slice(0,settings.target);
   for(let i=0;i<unresolved.length;i+=5) {
    await Promise.all(unresolved.slice(i,i+5).map(async lead=>{
-    try {source.set(lead.googlePlaceId,await getGooglePlace(lead.googlePlaceId));} catch {}
+    try {const place=await getGooglePlace(lead.googlePlaceId,true);details.set(lead.googlePlaceId,place);source.set(lead.googlePlaceId,place);} catch {}
    }));
    if(!form.isConnected) return;
   }
@@ -212,18 +251,35 @@ async function previewBeat(form) {
    }
   }
   const already=new Set(plan());
-  const remaining=Math.max(0,settings.target-already.size);
+  const completed=plan().filter(id=>visited(id)).length;
   const start=device||areaPoint;
-  const existing=plan().map(id=>{
-   const lead=data.leads[id],listing=source.get(lead.googlePlaceId);
-   return {...lead,name:lead.name||listing?.name||'',lat:lead.lat??listing?.lat,lng:lead.lng??listing?.lng,googleRoute:Boolean(listing)};
-  });
-  const from=existing.map(pointOf).filter(Boolean).at(-1)||start;
-  const added=arrangeBeat(candidates.filter(lead=>!already.has(lead.id)),from,remaining);
-  if(!form.isConnected) return;
-  beatDraft={stops:[...existing,...added],added,start,label:device?'Your location':'Area centre',area:areaLabel,
-   google:Boolean(settings.area&&areaPoint)||[...existing,...added].some(lead=>lead.googleRoute),
-   notice:note||(!added.length?(remaining?'No additional eligible businesses for these settings.':'Today’s saved stops already meet your target.'):'')};
+  if(!start) throw new Error('A mapped area or device location is required to estimate travel time.');
+  const existing=plan().filter(id=>!visited(id)).map(id=>({...data.leads[id]}));
+  const fresh=candidates.filter(lead=>!already.has(lead.id));
+  const hoursCandidates=[...existing,...fresh.filter(lead=>lead.followUp),...fresh.filter(lead=>!lead.followUp)];
+  const ids=[...new Set(hoursCandidates.map(lead=>lead.googlePlaceId).filter(Boolean))];
+  if(googleConfigured()) {
+   setBeatStatus('Checking business hours…');
+   // Bound Place Details calls per preview. Existing stops and due follow-ups take priority.
+   const lookupIds=ids.slice(0,Math.max(existing.length,Math.min(40,Math.max(8,settings.target*2)))).filter(id=>!details.has(id));
+   for(let i=0;i<lookupIds.length;i+=5) {
+    await Promise.all(lookupIds.slice(i,i+5).map(async id=>{
+     try {details.set(id,await getGooglePlace(id,true));} catch {}
+    }));
+    if(!form.isConnected) return;
+   }
+  }
+  const hydrate=lead=>{
+   const listing=details.get(lead.googlePlaceId)||source.get(lead.googlePlaceId);
+   return listing?{...lead,name:lead.name||listing.name,lat:lead.lat??listing.lat,lng:lead.lng??listing.lng,
+    hours:listing.hours,utcOffset:listing.utcOffset,businessStatus:listing.businessStatus,googleRoute:true}:lead;
+  };
+  const timeline=scheduleBeat(existing.map(hydrate),fresh.map(hydrate),start,{...settings,target:Math.max(0,settings.target-completed)});
+  const {stops,added,unscheduled}=timeline;
+  beatDraft={...timeline,added,start,label:device?'Your location':'Area centre',area:areaLabel,
+   google:Boolean(settings.area&&areaPoint)||stops.some(lead=>lead.googleRoute),
+   notice:[note,unscheduled.length?'Resolve the unscheduled saved stops before adding more.':'',
+    stops.length+completed<settings.target?'Only '+(stops.length+completed)+' of '+settings.target+' visits fit or have eligible locations.':''].filter(Boolean).join(' ')};
   renderBeatPreview();
   setBeatStatus(added.length+' additional '+(added.length===1?'stop':'stops')+' found.');
   document.querySelector('#beat-preview')?.scrollIntoView({block:'start'});
@@ -245,9 +301,15 @@ function renderBeatPreview() {
    (beat.area?safe(beat.area)+' · ':'')+beat.stops.length+' stops · '+total.toFixed(2)+' km straight-line')+
   (nodes.length?'<div class="beat-map" id="beat-map"></div>':'<p class="sub">No coordinates available for this route.</p>')+
   '<p class="sub">'+(beat.start?'0 = '+safe(beat.label)+'. ':'Device location unavailable. ')+'Distances are estimates from coordinates. Stops without coordinates are listed below.</p>'+
+  (beat.deadline!==undefined?'<p><strong>Expected finish '+timeLabel(beat.finish)+' IST</strong> · Cutoff '+timeLabel(beat.deadline)+' IST</p>':'')+
   (beat.notice?'<p class="sub">'+safe(beat.notice)+'</p>':'')+
   '<ol class="beat-stops">'+beat.stops.map((lead,i)=>'<li><strong>'+safe(nameOf(lead))+'</strong><span>'+
-   (lead.followUp?'Follow-up · ':'')+(legs.has(i+1)?legs.get(i+1).toFixed(2)+' km from previous mapped point':pointOf(lead)?'First mapped stop':'Coordinates unavailable')+'</span></li>').join('')+'</ol>'+
+   (lead.followUp?'Follow-up · ':'')+(legs.has(i+1)?legs.get(i+1).toFixed(2)+' km from previous mapped point':pointOf(lead)?'First mapped stop':'Coordinates unavailable')+'</span>'+
+   (lead.timing?'<span><strong>'+timeLabel(lead.timing.start)+'–'+timeLabel(lead.timing.end)+' IST</strong> · '+lead.timing.engagement+
+    ' min visit · '+lead.timing.travel+' min travel'+(lead.timing.wait?' · arrive '+timeLabel(lead.timing.arrival)+' · '+lead.timing.wait+' min wait':'')+
+    ' · '+(lead.timing.known?'Fits listed hours':'Hours unknown — confirm before visiting')+'</span>':'')+'</li>').join('')+'</ol>'+
+  (beat.unscheduled?.length?'<h3>Saved stops outside this schedule</h3><ul class="beat-stops">'+beat.unscheduled.map(lead=>
+   '<li>'+safe(nameOf(lead))+' · '+safe(lead.reason)+'</li>').join('')+'</ul>':'')+
   (beatDraft?.added.length?btn('Save '+beatDraft.added.length+' new stops',{act:'saveBeat',extra:'primary'}):'')+'</section>';
  const graph=host.querySelector('#beat-map');
  if(graph) {
@@ -440,6 +502,7 @@ function render() {
  if(page==='leads') updateResults();
  if(beatRoute()) {
   updateBeatLocation();
+  loadTerritories();
   if(!locationRequest) useCurrentLocation();
   renderBeatPreview();
  }
@@ -552,7 +615,7 @@ document.addEventListener('click',e=>{
  const {go,act,id}=button.dataset;
  if(go) {navigate(go);return;}
  const actions={
-  locate:useCurrentLocation,saveBeat,showSavedBeat:()=>showSavedBeat(button),
+  locate:useCurrentLocation,saveTerritory:()=>saveTerritory(button),saveBeat,showSavedBeat:()=>showSavedBeat(button),
   loadPitchOptions:()=>loadPitchOptions(button.closest('[data-pitch-id]'),id),
   generatePitch:()=>readPitch(button.closest('[data-pitch-id]'),id,button),
   pitchLanguage:()=>changePitchLanguage(button,id),
@@ -570,6 +633,14 @@ document.addEventListener('submit',e=>{
 });
 document.addEventListener('input',e=>{if(e.target.id==='search'){query=e.target.value;updateResults();}});
 document.addEventListener('change',e=>{
+ if(e.target.id==='beat-territory') {
+  const territory=territories.find(item=>String(item.id)===e.target.value);
+  if(territory) {
+   e.target.form.elements.area.value=territory.area;
+   e.target.form.elements.radius.value=territory.radius;
+   beatSettings.area=territory.area;beatSettings.radius=territory.radius;
+  }
+ }
  if(e.target.closest('#beat-form')) {beatDraft=null;savedRoute=null;renderBeatPreview();}
  if(e.target.matches('[data-pitch-product]')) updatePitchProduct(e.target.closest('[data-pitch-id]'),e.target.value);
 });

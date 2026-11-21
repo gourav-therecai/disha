@@ -260,3 +260,17 @@ class WorkspaceTests(TestCase):
             "name": " CORNER   STORE ", "area": " mumbai ",
         }
         self.assertEqual(other.put(self.url, json.dumps(second), content_type="application/json").status_code, 409)
+
+    def test_territories_are_private_and_saved_by_area(self):
+        route = "/api/beat/territories"
+        self.assertEqual(Client().get(route).status_code, 401)
+        response = self.client.post(route, {"area": "Andheri East, Mumbai", "radius": 2},
+                                    content_type="application/json")
+        self.assertEqual(response.status_code, 200)
+        self.client.post(route, {"area": "Andheri East, Mumbai", "radius": 5},
+                         content_type="application/json")
+        result = self.client.get(route).json()["territories"]
+        self.assertEqual([(item["area"], item["radius"]) for item in result], [("Andheri East, Mumbai", 5)])
+        other = Client()
+        other.force_login(get_user_model().objects.create_user("territory-rep"))
+        self.assertEqual(other.get(route).json(), {"territories": []})

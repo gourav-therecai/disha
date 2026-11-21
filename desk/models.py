@@ -112,3 +112,13 @@ class LeadPitch(models.Model):
 class BusinessAllocation(models.Model):
     key = models.CharField(max_length=72, primary_key=True)
     lead = models.ForeignKey(Lead, on_delete=models.CASCADE, related_name="allocations")
+
+
+class Territory(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    area = models.CharField(max_length=120)
+    radius = models.PositiveSmallIntegerField(default=5)
+
+    class Meta:
+        ordering = ("area", "pk")
+        constraints = [models.UniqueConstraint(fields=("user", "area"), name="unique_user_territory")]

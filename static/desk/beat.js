@@ -60,3 +60,65 @@ export function drawCoordinateBeat(host,nodes) {
  }
  host.replaceChildren(svg);
 }
+
+const DAY=1440, WEEK=7*DAY;
+const weekMinute=p=>p.day*DAY+p.hour*60+p.minute;
+
+export function openingSlot(lead,arrival,engagement,localDay) {
+ if(['CLOSED_TEMPORARILY','CLOSED_PERMANENTLY','FUTURE_OPENING'].includes(lead.businessStatus)) return null;
+ if(!Array.isArray(lead.hours)||!Number.isFinite(lead.utcOffset)) return {start:arrival,known:false};
+ const shift=lead.utcOffset-330;
+ let earliest=Infinity;
+ for(const period of lead.hours) {
+  if(!period.open) continue;
+  if(!period.close) return {start:arrival,known:true};
+  const open=weekMinute(period.open);
+  let close=weekMinute(period.close);
+  if(close<=open) close+=WEEK;
+  for(const offset of [-WEEK,0,WEEK]) {
+   const start=Math.max(arrival,open+offset-localDay*DAY-shift);
+   const end=close+offset-localDay*DAY-shift;
+   if(start+engagement<=end) earliest=Math.min(earliest,start);
+  }
+ }
+ return Number.isFinite(earliest)?{start:earliest,known:true}:null;
+}
+
+export function scheduleBeat(existing,candidates,start,{startMinute,budget,engagement,speed,target,localDay}) {
+ const deadline=startMinute+budget,stops=[],added=[],unscheduled=[];
+ let point=start, clock=startMinute;
+ function estimate(lead) {
+  const location=pointOf(lead);
+  if(!point||!location) return {reason:'Travel could not be estimated'};
+  const travel=Math.ceil(km(point,location)*60/speed);
+  const arrival=clock+travel;
+  const slot=openingSlot(lead,arrival,engagement,localDay);
+  if(!slot) return {reason:'Closed during the available visit window'};
+  const end=slot.start+engagement;
+  if(end>deadline) return {reason:slot.known&&slot.start>arrival?'Opening hours do not fit the time budget':'Outside the time budget'};
+  return {timing:{arrival,start:slot.start,end,travel,engagement,wait:slot.start-arrival,known:slot.known}};
+ }
+ function commit(lead,timing) {
+  const scheduled={...lead,timing};
+  stops.push(scheduled);
+  clock=timing.end;
+  point=pointOf(lead);
+  return scheduled;
+ }
+ for(const stop of existing) {
+  const option=estimate(stop);
+  if(option.timing) commit(stop,option.timing);
+  else unscheduled.push({...stop,reason:option.reason});
+ }
+ const remaining=[...candidates];
+ while(existing.length+added.length<target&&!unscheduled.length) {
+  const options=remaining.map(lead=>({lead,...estimate(lead)})).filter(option=>option.timing);
+  options.sort((a,b)=>Number(Boolean(b.lead.followUp))-Number(Boolean(a.lead.followUp))||
+   a.timing.end-b.timing.end||a.timing.travel-b.timing.travel);
+  if(!options.length) break;
+  const {lead,timing}=options[0];
+  remaining.splice(remaining.indexOf(lead),1);
+  added.push(commit(lead,timing));
+ }
+ return {stops,added,unscheduled,remaining,deadline,finish:clock};
+}
