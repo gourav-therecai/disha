@@ -112,3 +112,43 @@ export async function getGooglePlace(googlePlaceId) {
  return {name:place.displayName||'',area:place.formattedAddress||'',
   lat:place.location?.lat(),lng:place.location?.lng()};
 }
+
+export async function resolveBeatArea(address) {
+ const maps=await load(config.key);
+ const {Geocoder}=await maps.importLibrary('geocoding');
+ const {results}=await new Geocoder().geocode({address,region:'IN'});
+ const result=results[0];
+ if(!result||result.partial_match) throw new Error('Enter a more specific area, including the city.');
+ return {point:[result.geometry.location.lat(),result.geometry.location.lng()],label:result.formatted_address};
+}
+
+export async function drawGoogleBeat(host,nodes) {
+ const maps=await load(config.key);
+ const [{Map,Polyline},{AdvancedMarkerElement,PinElement},{LatLngBounds}]=await Promise.all([
+  maps.importLibrary('maps'),maps.importLibrary('marker'),maps.importLibrary('core')
+ ]);
+ if(!host.isConnected) return;
+ const position=point=>({lat:point[0],lng:point[1]});
+ const map=new Map(host,{mapId:config.mapId||'DEMO_MAP_ID',center:position(nodes[0].point),zoom:14,
+  mapTypeControl:false,streetViewControl:false,clickableIcons:false});
+ const bounds=new LatLngBounds();
+ let previous;
+ for(const node of nodes) {
+  const at=position(node.point);
+  bounds.extend(at);
+  const pin=new PinElement({glyphText:String(node.number),background:node.number?'#147354':'#245b93',borderColor:'#fff',glyphColor:'#fff'});
+  const marker=new AdvancedMarkerElement({map,position:at,title:node.label});
+  marker.append(pin);
+  if(previous) {
+   new Polyline({map,path:[position(previous.point),at],geodesic:true,strokeColor:'#147354',strokeWeight:4});
+   const label=document.createElement('span');
+   label.className='beat-edge-label';
+   label.textContent=node.km.toFixed(2)+' km';
+   const mid=[(previous.point[0]+node.point[0])/2,(previous.point[1]+node.point[1])/2];
+   const edge=new AdvancedMarkerElement({map,position:position(mid),title:label.textContent,zIndex:100});
+   edge.append(label);
+  }
+  previous=node;
+ }
+ if(nodes.length>1) map.fitBounds(bounds,50);
+}

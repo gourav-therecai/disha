@@ -11,6 +11,7 @@ urlpatterns = [
     path("api/session", views.session),
     path("api/maps-config", views.maps_config),
     path("api/workspace", views.workspace),
+    path("api/beat/availability", views.beat_availability),
     path("api/leads/<uuid:lead_id>/pitch-options", views.pitch_options),
     path("api/leads/<uuid:lead_id>/pitch", views.lead_pitch),
     path("api/visits/<uuid:visit_id>/photo", views.visit_photo),

@@ -16,8 +16,9 @@ from django.utils import timezone
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_http_methods
 
-from .models import ACTIONS, CATEGORIES, LESSONS, RATINGS, Lead, LeadPitch, LessonCompletion, PitchProduct, PlanStop, Visit, VisitPhoto, WorkspaceRevision
+from .models import ACTIONS, BusinessAllocation, CATEGORIES, LESSONS, RATINGS, Lead, LeadPitch, LessonCompletion, PitchProduct, PlanStop, Visit, VisitPhoto, WorkspaceRevision
 
+from .allocations import AllocationConflict, allocation_key
 from .photos import normalize_visit_photo
 from .pitches import RECIPIENTS, PitchUnavailable, generate_pitch
 
@@ -80,6 +81,11 @@ def export_workspace(user):
         "hasPhoto": visit.has_photo,
     } for visit in Visit.objects.filter(lead__user=user).annotate(has_photo=Exists(VisitPhoto.objects.filter(visit_id=OuterRef("pk"))))]
     lessons = list(LessonCompletion.objects.filter(user=user).values_list("lesson", flat=True))
+    keys = {identifier: allocation_key(lead.get("googlePlaceId"), lead["name"], lead["area"])
+            for identifier, lead in leads.items()}
+    blocked = blocked_allocation_keys(user, keys.values())
+    for identifier, lead in leads.items():
+        lead["allocationBlocked"] = keys[identifier] in blocked
     return {"version": 1, "leads": leads, "plans": plans, "visits": visits, "completedLessons": lessons}
 
 
@@ -116,6 +122,16 @@ def coordinate(value, limit):
     return value
 
 
+def blocked_allocation_keys(user, keys):
+    return set(BusinessAllocation.objects.filter(pk__in=keys).exclude(lead__user=user).values_list("pk", flat=True))
+
+
+def claim_business(lead, key):
+    claim, _ = BusinessAllocation.objects.get_or_create(key=key, defaults={"lead": lead})
+    if claim.lead_id != lead.pk:
+        raise AllocationConflict("This business already belongs to a saved lead. Refresh the beat and choose another stop.")
+
+
 def save_leads(user, values, today):
     existing = {str(lead.pk): lead for lead in Lead.objects.filter(user=user)}
     if set(existing) - values.keys():
@@ -144,8 +160,13 @@ def save_leads(user, values, today):
             "google_place_id": google_id, "opened_on": opened,
         }
         if lead is None:
-            Lead.objects.create(pk=identifier, user=user, **fields)
+            lead = Lead.objects.create(pk=identifier, user=user, **fields)
+            claim_business(lead, allocation_key(google_id, lead.name, lead.address))
         elif any(getattr(lead, key) != value for key, value in fields.items()):
+            previous_key = allocation_key(lead.google_place_id, lead.name, lead.address)
+            next_key = allocation_key(google_id, fields["name"], fields["address"])
+            if previous_key != next_key:
+                claim_business(lead, next_key)
             for key, value in fields.items():
                 setattr(lead, key, value)
             lead.save(update_fields=[*fields, "updated_at"])
@@ -179,6 +200,7 @@ def save_visits(user, visits, lead_ids, today):
 
 def save_plan(user, plans, lead_ids):
     existing = {(row.plan_date, str(row.lead_id)): row for row in PlanStop.objects.filter(user=user, lead__user=user)}
+    owned = {str(lead.pk): lead for lead in Lead.objects.filter(user=user)}
     for raw_day, leads in plans.items():
         plan_day = parse_day(raw_day)
         if not isinstance(leads, list) or len(set(leads)) != len(leads) or not set(leads).issubset(lead_ids):
@@ -186,6 +208,8 @@ def save_plan(user, plans, lead_ids):
         for position, lead_id in enumerate(leads):
             item = existing.pop((plan_day, lead_id), None)
             if item is None:
+                lead = owned[lead_id]
+                claim_business(lead, allocation_key(lead.google_place_id, lead.name, lead.address))
                 PlanStop.objects.create(user=user, lead_id=lead_id, plan_date=plan_day, position=position)
             elif item.position != position:
                 PlanStop.objects.filter(pk=item.pk).update(position=position)
@@ -247,6 +271,8 @@ def workspace(request):
             return JsonResponse({"revision": revision + 1, "data": export_workspace(user)})
     except (KeyError, TypeError, AttributeError, json.JSONDecodeError):
         return error("Check the workspace data.", 400)
+    except AllocationConflict as exc:
+        return error(str(exc), 409)
     except ValueError as exc:
         return error(str(exc), 400)
     except IntegrityError:
@@ -323,3 +349,22 @@ def lead_pitch(request, lead_id):
     if not available.filter(requested_at=now).update(**result):
         return error("This pitch request was superseded. Try again.", 409)
     return JsonResponse(result)
+
+
+
+@require_http_methods(["POST"])
+@never_cache
+def beat_availability(request):
+    if not request.user.is_authenticated:
+        return error("Sign in to Disha.", 401)
+    try:
+        ids = json.loads(request.body)["place_ids"]
+        if not isinstance(ids, list) or len(ids) > 150 or any(
+            not isinstance(item, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,1024}", item) for item in ids
+        ):
+            raise ValueError
+    except (ValueError, TypeError, KeyError):
+        return error("Invalid Google Place IDs.", 400)
+    keys = {item: allocation_key(item, "", "") for item in ids}
+    blocked = blocked_allocation_keys(request.user, keys.values())
+    return JsonResponse({"unavailable": [item for item in keys if keys[item] in blocked]})

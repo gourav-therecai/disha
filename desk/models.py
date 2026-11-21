@@ -107,3 +107,8 @@ class LeadPitch(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=("lead", "category", "product", "product_revision"), name="unique_pitch_product_revision")]
+
+
+class BusinessAllocation(models.Model):
+    key = models.CharField(max_length=72, primary_key=True)
+    lead = models.ForeignKey(Lead, on_delete=models.CASCADE, related_name="allocations")

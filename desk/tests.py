@@ -224,3 +224,39 @@ class WorkspaceTests(TestCase):
             })
             self.assertFalse(body["store"])
             self.assertTrue(body["text"]["format"]["strict"])
+
+    def test_google_business_cannot_be_allocated_to_two_reps(self):
+        state = self.state()
+        self.add_lead(state)
+        state["data"]["leads"][self.lead_id]["googlePlaceId"] = "ChIJAssigned"
+        self.assertEqual(self.put(state).status_code, 200)
+
+        other = Client()
+        other.force_login(get_user_model().objects.create_user("second-rep"))
+        response = other.post("/api/beat/availability",
+                              {"place_ids": ["ChIJAssigned", "ChIJFree"]}, content_type="application/json")
+        self.assertEqual(response.json(), {"unavailable": ["ChIJAssigned"]})
+        second = other.get(self.url).json()
+        new_id = str(uuid.uuid4())
+        second["data"]["leads"][new_id] = {
+            **state["data"]["leads"][self.lead_id], "id": new_id,
+        }
+        second["data"]["plans"][self.today] = [new_id]
+        attempted = other.put(self.url, json.dumps(second), content_type="application/json")
+        self.assertEqual(attempted.status_code, 409)
+        self.assertFalse(Lead.objects.filter(pk=new_id).exists())
+        self.assertFalse(PlanStop.objects.exists())
+
+    def test_manual_business_allocation_normalizes_name_and_address(self):
+        state = self.state()
+        self.add_lead(state)
+        self.assertEqual(self.put(state).status_code, 200)
+        other = Client()
+        other.force_login(get_user_model().objects.create_user("manual-rep"))
+        second = other.get(self.url).json()
+        new_id = str(uuid.uuid4())
+        second["data"]["leads"][new_id] = {
+            **state["data"]["leads"][self.lead_id], "id": new_id,
+            "name": " CORNER   STORE ", "area": " mumbai ",
+        }
+        self.assertEqual(other.put(self.url, json.dumps(second), content_type="application/json").status_code, 409)

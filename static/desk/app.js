@@ -1,6 +1,7 @@
 import {categories,day,closeVisit,distance,center} from './store.js';
 import {mountMap} from './map.js';
-import {configureGoogleMaps,googleConfigured,searchGoogle,mountGoogleMap,getGooglePlace} from './google-map.js';
+import {configureGoogleMaps,googleConfigured,searchGoogle,getGooglePlace,resolveBeatArea,drawGoogleBeat} from './google-map.js';
+import {arrangeBeat,beatNodes,drawCoordinateBeat,pointOf} from './beat.js';
 
 const paths={
  grid:'M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z',
@@ -22,7 +23,7 @@ const paths={
 const icon=(name)=>'<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="'+(paths[name]||paths.pin)+'"/></svg>';
 const nameOf=lead=>lead.name||'Google business · '+lead.category;
 const safe=(value)=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const nav=[['home','Home','grid'],['discover','Discover','pin'],['plan','My Plan','calendar'],['leads','Leads','users'],['learn','Learn','book'],['reports','Reports','chart']];
+const nav=[['home','Home','grid'],['beat','Beat Plan','calendar'],['leads','Leads','users'],['learn','Learn','book'],['reports','Reports','chart']];
 const lessons=[
  ['products','Product Knowledge','Our banking products','Know what to ask before recommending a current account.','layers','Ask about monthly transactions, cash deposits, and payment collections. Explain the balance requirement and charges clearly before the owner decides.','What should you confirm before recommending an account?',['Monthly transaction needs','The shop’s opening time'],'Monthly transaction needs'],
  ['pitch','Pitch & Visit Guides','How to pitch','A short field pitch for busy business owners.','users','Introduce yourself and ask for two minutes. Start with a question about payments or deposits. Explain one relevant benefit and agree on a specific next step.','How should you open a first visit?',['List every product feature','Ask for time and one relevant question'],'Ask for time and one relevant question'],
@@ -33,17 +34,15 @@ const kind={Pharmacy:['cross',''],Restaurant:['food','warm'],Retail:['cart','coo
 const main=document.querySelector('#main'),modal=document.querySelector('#modal'),toast=document.querySelector('#toast');
 const csrf=document.querySelector('meta[name="csrf-token"]').content;
 let data, revision, user, saving=false;
-let places=[], discoveryBusy=false, discoveryMessage='', discoveryRequest=0, discoveryTimer, searched='';
-let query='',category='All',radius=5,learnFilter='All',tab='Overview',planDate=day(),mapCleanup=()=>{},timer;
+let query='',category='All',radius=5,learnFilter='All',tab='Overview',mapCleanup=()=>{},timer;
 let origin=center, locationMode='loading', locationRequest=0;
 const locationLabel=()=>({live:'Your location',loading:'Locating you…',fallback:'Location unavailable · map centred on Noida'})[locationMode];
 function useCurrentLocation() {
  const request=++locationRequest;
  const finish=(mode,coords=center)=>{
   if(request!==locationRequest) return;
-  locationMode=mode;origin=coords;clearDiscovery();
+  locationMode=mode;origin=coords;
   refreshLocation();
-  scheduleDiscovery();
  };
  if(!navigator.geolocation) {finish('fallback');return;}
  locationMode='loading';
@@ -54,21 +53,14 @@ function useCurrentLocation() {
 }
 function refreshLocation() {
  // Keep active forms and search input intact during an asynchronous location update.
- const locationBar=document.querySelector('#location-controls');
- if(locationBar) locationBar.innerHTML=locationControls();
+ updateBeatLocation();
  for(const label of main.querySelectorAll('[data-distance]')) {
   const lead=data.leads[label.dataset.distance];
-  if(lead) label.textContent=distanceLabel(lead);
+  if(lead) label.textContent=locationMode==='live'?distanceLabel(lead):'';
  }
  const map=document.querySelector('#map');
- if(!map) return;
- if(location.hash==='#discover') updateResults(true);
- else {mapCleanup();mapCleanup=mountMap(map,nearbyLeads(),icon,{origin,labelText:locationLabel(),mini:true,radius});}
+ if(map) {mapCleanup();mapCleanup=mountMap(map,nearbyLeads(),icon,{origin,labelText:locationLabel(),mini:true,radius});}
 }
-const locationControls=()=>'<span class="sub" role="status">'+locationLabel()+'</span>'+
- (locationMode==='fallback'?btn('Use my location',{act:'locate'}):'')+
- (locationMode==='live'&&googleConfigured()?btn('Refresh businesses',{act:'discoverLive'}):'')+
- '<span class="location-help">'+(googleConfigured()?'Search uses your current location and the selected radius. ':'Google business search is awaiting a Maps API key. Saved leads are still available. ')+'<a href="/maps-and-data">Maps and data</a></span>';
 const displayDate=(iso)=>new Intl.DateTimeFormat('en-IN',{timeZone:'Asia/Kolkata',day:'numeric',month:'short',weekday:'short'}).format(new Date(iso+'T12:00:00+05:30'));
 const btn=(label,{go,act,id,extra=''}={})=>'<button type="button" class="btn '+extra+'" '+(go?'data-go="'+go+'"':'data-act="'+act+'"')+(id?' data-id="'+id+'"':'')+'>'+label+'</button>';
 const tile=(name,tone='')=>'<span class="tile '+tone+'">'+icon(name)+'</span>';
@@ -101,59 +93,212 @@ const visitButton=(id,date=day())=>date===day()&&!visited(id)?btn('Start visit',
 function home() {
  const ids=plan();
  const hour=Number(new Intl.DateTimeFormat('en-GB',{hour:'numeric',hourCycle:'h23',timeZone:'Asia/Kolkata'}).format(new Date()));
- return '<section class="hero"><div><p class="eyebrow">FIELD SALES WORKSPACE</p><h1>Good '+(hour<12?'morning':hour<17?'afternoon':'evening')+', '+firstName()+'.</h1><p>Plan your stops, meet local businesses, and track every conversation.</p></div>'+btn(icon('pin')+' Discover nearby',{go:'discover',extra:'light'})+'</section>'+metrics()+
- '<div class="layout"><section class="card pad">'+section('Today’s plan',ids.length+' planned visits',btn('View plan',{go:'plan'}))+
+ return '<section class="hero"><div><p class="eyebrow">FIELD SALES WORKSPACE</p><h1>Good '+(hour<12?'morning':hour<17?'afternoon':'evening')+', '+firstName()+'.</h1><p>Plan your stops, meet local businesses, and track every conversation.</p></div>'+btn(icon('pin')+' Plan today’s beat',{go:'beat',extra:'light'})+'</section>'+metrics()+
+ '<div class="layout"><section class="card pad">'+section('Today’s plan',ids.length+' planned visits',btn('View plan',{go:'beat'}))+
  (ids.slice(0,5).map(id=>row(data.leads[id],visitButton(id),false)).join('')||empty('Add nearby leads to start your day.'))+
- '</section><div class="stack"><section class="card pad">'+section('Quick actions')+'<div class="quick">'+quick('Discover leads','pin','data-go="discover"')+quick('View day plan','calendar','data-go="plan"')+quick('Learn & practice','book','data-go="learn"')+quick('Add a new lead','add','data-act="add"')+'</div></section><section class="card pad">'+section('Territory map','Browse businesses near your starting point',btn('Open map',{go:'discover'}))+'<div class="map mini" id="map" aria-label="Territory map"></div></section></div></div>';
+ '</section><div class="stack"><section class="card pad">'+section('Quick actions')+'<div class="quick">'+quick('Build a beat','calendar','data-go="beat"')+quick('Learn & practice','book','data-go="learn"')+quick('Add a new lead','add','data-act="add"')+'</div></section><section class="card pad">'+section('Territory map','Browse businesses near your starting point',btn('Open map',{go:'beat'}))+'<div class="map mini" id="map" aria-label="Territory map"></div></section></div></div>';
 }
-function listPage(discover) {
- return heading(discover?'Nearby establishments':'Lead management',discover?'Find nearby businesses and save them to your workspace.':'Manage profiles, visit history and follow-ups.',btn(icon('add')+(discover?' Add a missing business':' Add lead'),{act:'add',extra:'primary'}))+
- (discover?'<div class="toolbar" id="location-controls">'+locationControls()+'</div>':'')+'<div class="toolbar"><input id="search" type="search" aria-label="Search establishments" placeholder="Search name, sector or category" value="'+safe(query)+'">'+(discover?'<select id="radius" aria-label="Search radius">'+[1,2,5].map(r=>'<option '+(r===radius?'selected':'')+' value="'+r+'">'+r+' km radius</option>').join('')+'</select>':'')+'</div>'+
+function listPage() {
+ return heading('Lead management','Manage profiles, visit history and follow-ups.',btn(icon('add')+' Add lead',{act:'add',extra:'primary'}))+
+ '<div class="toolbar"><input id="search" type="search" aria-label="Search establishments" placeholder="Search name, area or category" value="'+safe(query)+'"></div>'+
  '<div class="toolbar">'+['All',...categories].map(c=>'<button class="chip '+(c===category?'active':'')+'" data-act="category" data-id="'+c+'">'+c+'</button>').join('')+'</div>'+
- '<div class="'+(discover?'layout equal':'')+'"><section class="card pad"><div id="results"></div></section>'+(discover?'<section class="card pad">'+section('Territory map','Select a pin to open its profile')+'<div class="map" id="map" aria-label="Map of nearby establishments"></div></section>':'')+'</div>';
+ '<section class="card pad"><div id="results"></div></section>';
 }
-function updateResults(discover) {
- const available=Object.values(data.leads);
- if(discover) for(const place of places) {
-  const index=available.findIndex(lead=>lead.googlePlaceId===place.googlePlaceId);
-  if(index<0) available.push(place);
-  else {
-   const lead=available[index];
-   available[index]={...lead,name:lead.name||place.name,area:lead.area||place.area,
-    lat:lead.lat??place.lat,lng:lead.lng??place.lng};
-  }
- }
- const match=available.filter(l=>(category==='All'||category===l.category)&&[l.name,l.area,l.category].join(' ').toLowerCase().includes(query.trim().toLowerCase())&&(!discover||(km(l)!==null&&km(l)<=radius)));
- if(discover) match.sort((a,b)=>km(a)-km(b));
- const notice=discover&&(discoveryBusy||discoveryMessage)?'<div class="sub" role="status">'+safe(discoveryBusy?'Searching Google Maps…':discoveryMessage)+'</div>':'';
- document.querySelector('#results').innerHTML=section(match.length+(match.length===1?' establishment':' establishments'))+notice+
- (match.map(l=>{
-  if(!data.leads[l.id]) return '<div class="row">'+tile(...kind[l.category])+'<div class="grow"><strong>'+safe(l.name)+'</strong><small>'+info(l)+'</small><br><small>Google Maps</small></div>'+btn('Link as lead',{act:'savePlace',id:l.id})+'</div>';
-  const action=discover?(plan().includes(l.id)?badge('Planned'):btn('Add to plan',{act:'planAdd',id:l.id})):btn('Open',{go:'lead/'+l.id});
-  return row(l,action);
- }).join('')||empty(discover?'No matching businesses. Try another radius or category, or add the business manually.':'No matching leads. Add a business to get started.'));
+function updateResults() {
+ const match=Object.values(data.leads).filter(l=>(category==='All'||category===l.category)&&[l.name,l.area,l.category].join(' ').toLowerCase().includes(query.trim().toLowerCase()));
+ document.querySelector('#results').innerHTML=section(match.length+(match.length===1?' establishment':' establishments'))+
+ (match.map(l=>row(l,btn('Open',{go:'lead/'+l.id}))).join('')||empty('No matching leads. Add a business to get started.'));
+}
+const beatSettings={area:'',target:8,radius:5,category:'All',followups:true};
+let beatDraft=null, beatBusy=false, savedRoute=null;
+const beatRoute=()=>['beat','discover','plan'].includes(location.hash.slice(1));
 
- if(!discover) return;
- const host=document.querySelector('#map');
- mapCleanup();
- if(googleConfigured()) {
-  host.classList.add('google-map');
-  mapCleanup=mountGoogleMap(host,match,{origin,radius,onSelect:lead=>{
-   if(data.leads[lead.id]) navigate('lead/'+lead.id);
-   else focusPlace(lead.id);
-  },onError:error=>{host.textContent=error.message;}});
- } else {
-  mapCleanup=mountMap(host,match,icon,{origin,labelText:locationLabel(),radius});
+function beatPage() {
+ const ids=plan();
+ const form='<form id="beat-form" class="card pad beat-form">'+section('Set up today’s beat')+
+  field('Area','<input name="area" maxlength="120" autocomplete="off" placeholder="e.g. Andheri East, Mumbai" value="'+safe(beatSettings.area)+'">')+
+  '<p class="sub" id="beat-location">Leave blank to use your current location.</p>'+btn('Use my location',{act:'locate'})+
+  '<div class="beat-fields">'+field('Visit target','<input name="target" type="number" min="1" max="40" value="'+beatSettings.target+'" required>')+
+  field('Search radius','<select name="radius">'+[1,2,5].map(n=>'<option value="'+n+'" '+(n===beatSettings.radius?'selected':'')+'>'+n+' km</option>').join('')+'</select>')+'</div>'+
+  field('New business category','<select name="category">'+['All',...categories].map(c=>'<option '+(c===beatSettings.category?'selected':'')+'>'+c+'</option>').join('')+'</select>')+
+  '<label class="beat-check"><input type="checkbox" name="followups" '+(beatSettings.followups?'checked':'')+'> Include due and overdue follow-ups</label>'+
+  '<button class="btn primary" type="submit">Preview beat</button><p id="beat-status" class="sub" role="status"></p></form>';
+ return heading('Beat Plan',displayDate(day())+' · Find businesses and plan your visits',btn('Add business',{act:'add'}))+
+  '<div class="beat-layout">'+form+'<div class="beat-output"><div id="beat-preview"></div>'+
+  '<section class="card pad">'+section('Today’s saved stops',ids.filter(id=>visited(id)).length+' of '+ids.length+' visited',
+    ids.length?btn('Show saved route',{act:'showSavedBeat'}):'')+
+  (ids.map(id=>row(data.leads[id],visitButton(id)+(visited(id)?'':btn('Remove',{act:'planRemove',id})),false)).join('')||empty('Save a preview to build today’s beat.'))+
+  '</section></div></div>';
+}
+function updateBeatLocation() {
+ const label=document.querySelector('#beat-location');
+ if(label) label.textContent=locationMode==='live'?'Your location is ready. Leave area blank to search nearby.':
+  locationMode==='loading'?'Waiting for device location. You can also enter an area.':'Enter an area or allow location access.';
+}
+function setBeatStatus(message) {
+ const label=document.querySelector('#beat-status');
+ if(label) label.textContent=message;
+}
+function nearbyForBeat(leads,point,area,radius) {
+ return leads.filter(lead=>{
+  const location=pointOf(lead);
+  if(location&&point) return distance(...location,point)<=radius;
+  return Boolean(area&&lead.area.toLowerCase().includes(area.toLowerCase()));
+ });
+}
+async function previewBeat(form) {
+ if(beatBusy) return;
+ const values=new FormData(form);
+ beatSettings.area=values.get('area').trim();
+ beatSettings.target=Number(values.get('target'));
+ beatSettings.radius=Number(values.get('radius'));
+ beatSettings.category=values.get('category');
+ beatSettings.followups=values.has('followups');
+ const settings={...beatSettings};
+ for(const field of form.elements) field.disabled=true;beatBusy=true;beatDraft=null;savedRoute=null;
+ renderBeatPreview();
+ setBeatStatus('Finding available businesses…');
+ try {
+  const device=locationMode==='live'?origin:null;
+  let areaPoint=settings.area?null:device,areaLabel=settings.area;
+  let note='';
+  if(settings.area&&googleConfigured()) {
+   try {
+    const resolved=await resolveBeatArea(settings.area);
+    areaPoint=resolved.point;areaLabel=resolved.label;
+   } catch {note='Could not locate that area on Google Maps. Showing saved leads whose address matches.';}
+  }
+  if(!areaPoint&&!settings.area) throw new Error('Allow location access or enter an area to preview your beat.');
+  let candidates=[],source=new Map();
+  if(areaPoint&&googleConfigured()) {
+   try {
+    const search=await searchGoogle(areaPoint,settings.radius,settings.category);
+    if(!form.isConnected) return;
+    source=new Map(search.places.map(place=>[place.googlePlaceId,place]));
+    const availability=await api('/api/beat/availability',{method:'POST',headers:{'X-CSRFToken':csrf,'Content-Type':'application/json'},
+      body:JSON.stringify({place_ids:[...source.keys()]})});
+    for(const id of availability.unavailable) source.delete(id);
+    if(search.failures.length) note='Some business categories could not be searched.';
+   } catch {source.clear();note='Google discovery is unavailable. Showing saved leads where possible.';}
+  }
+  const due=lead=>{
+   const followUp=latest(lead.id)?.followUpDate;
+   return Boolean(followUp&&followUp<=day());
+  };
+  const owned=Object.values(data.leads);
+  // A linked follow-up can be absent from a category-limited nearby search.
+  const unresolved=owned.filter(lead=>settings.followups&&googleConfigured()&&areaPoint&&
+   lead.googlePlaceId&&!source.has(lead.googlePlaceId)&&!pointOf(lead)&&!lead.allocationBlocked&&
+   !visited(lead.id)&&due(lead)).slice(0,settings.target);
+  for(let i=0;i<unresolved.length;i+=5) {
+   await Promise.all(unresolved.slice(i,i+5).map(async lead=>{
+    try {source.set(lead.googlePlaceId,await getGooglePlace(lead.googlePlaceId));} catch {}
+   }));
+   if(!form.isConnected) return;
+  }
+  const ownedGoogle=new Set(owned.map(lead=>lead.googlePlaceId).filter(Boolean));
+  const saved=owned.filter(lead=>!lead.allocationBlocked&&!visited(lead.id)).map(lead=>{
+   const listing=source.get(lead.googlePlaceId);
+   return {...lead,followUp:due(lead),googleRoute:Boolean(listing),
+    lat:lead.lat??listing?.lat,lng:lead.lng??listing?.lng,
+    name:lead.name||listing?.name||'',area:lead.area||listing?.area||''};
+  });
+  const nearby=nearbyForBeat(saved,areaPoint,settings.area,settings.radius);
+  candidates=nearby.filter(lead=>lead.followUp?settings.followups:
+   !latest(lead.id)&&(settings.category==='All'||lead.category===settings.category));
+  for(const place of source.values()) {
+   if(place.googlePlaceId&&!ownedGoogle.has(place.googlePlaceId)&&pointOf(place)&&distance(place.lat,place.lng,areaPoint)<=settings.radius) {
+    candidates.push({...place,googleRoute:true});
+   }
+  }
+  const already=new Set(plan());
+  const remaining=Math.max(0,settings.target-already.size);
+  const start=device||areaPoint;
+  const existing=plan().map(id=>{
+   const lead=data.leads[id],listing=source.get(lead.googlePlaceId);
+   return {...lead,name:lead.name||listing?.name||'',lat:lead.lat??listing?.lat,lng:lead.lng??listing?.lng,googleRoute:Boolean(listing)};
+  });
+  const from=existing.map(pointOf).filter(Boolean).at(-1)||start;
+  const added=arrangeBeat(candidates.filter(lead=>!already.has(lead.id)),from,remaining);
+  if(!form.isConnected) return;
+  beatDraft={stops:[...existing,...added],added,start,label:device?'Your location':'Area centre',area:areaLabel,
+   google:Boolean(settings.area&&areaPoint)||[...existing,...added].some(lead=>lead.googleRoute),
+   notice:note||(!added.length?(remaining?'No additional eligible businesses for these settings.':'Today’s saved stops already meet your target.'):'')};
+  renderBeatPreview();
+  setBeatStatus(added.length+' additional '+(added.length===1?'stop':'stops')+' found.');
+  document.querySelector('#beat-preview')?.scrollIntoView({block:'start'});
+ } catch(error) {
+  setBeatStatus(error.message);
+ } finally {
+  beatBusy=false;
+  for(const field of form.elements) field.disabled=false;
  }
 }
-function planner() {
- const ids=plan(planDate),done=ids.filter(id=>visited(id,planDate)).length;
- const available=Object.values(data.leads).filter(lead=>!ids.includes(lead.id));
- const options=available.map(lead=>'<option value="'+lead.id+'">'+safe(nameOf(lead))+'</option>').join('');
- const addStop=options?'<label for="planLead">Add a saved lead</label><div class="toolbar"><select id="planLead">'+options+'</select>'+btn('Add stop',{act:'planAddSelected'})+'</div>':'';
- return heading('My Plan','Organise stops and track category coverage.',btn('Discover leads',{go:'discover',extra:'primary'}))+'<div class="toolbar"><input style="width:auto" type="date" id="planDate" aria-label="Plan date" value="'+planDate+'"></div><div class="layout"><section class="card pad">'+section(displayDate(planDate),done+' of '+ids.length+' stops complete')+addStop+
- (ids.map(id=>row(data.leads[id],visitButton(id,planDate)+(!visited(id,planDate)?btn('Remove',{act:'planRemove',id}):''),false)).join('')||empty('There are no visits planned for this date.'))+'</section><section class="card pad">'+section('Category coverage','Distinct planned stops by business category')+
- categories.map(c=>'<div class="row"><span class="grow">'+c+'</span><strong>'+ids.filter(id=>data.leads[id].category===c).length+'</strong></div>').join('')+'</section></div>';
+function renderBeatPreview() {
+ const host=document.querySelector('#beat-preview'),beat=beatDraft||savedRoute;
+ if(!host) return;
+ if(!beat) {host.replaceChildren();return;}
+ const nodes=beatNodes(beat.stops,beat.start,beat.label,nameOf);
+ const legs=new Map(nodes.filter((node,index)=>node.number&&index>0).map(node=>[node.number,node.km]));
+ const total=nodes.reduce((sum,node)=>sum+node.km,0);
+ host.innerHTML='<section class="card pad beat-preview">'+section(beatDraft?'Beat preview':'Saved beat route',
+   (beat.area?safe(beat.area)+' · ':'')+beat.stops.length+' stops · '+total.toFixed(2)+' km straight-line')+
+  (nodes.length?'<div class="beat-map" id="beat-map"></div>':'<p class="sub">No coordinates available for this route.</p>')+
+  '<p class="sub">'+(beat.start?'0 = '+safe(beat.label)+'. ':'Device location unavailable. ')+'Distances are estimates from coordinates. Stops without coordinates are listed below.</p>'+
+  (beat.notice?'<p class="sub">'+safe(beat.notice)+'</p>':'')+
+  '<ol class="beat-stops">'+beat.stops.map((lead,i)=>'<li><strong>'+safe(nameOf(lead))+'</strong><span>'+
+   (lead.followUp?'Follow-up · ':'')+(legs.has(i+1)?legs.get(i+1).toFixed(2)+' km from previous mapped point':pointOf(lead)?'First mapped stop':'Coordinates unavailable')+'</span></li>').join('')+'</ol>'+
+  (beatDraft?.added.length?btn('Save '+beatDraft.added.length+' new stops',{act:'saveBeat',extra:'primary'}):'')+'</section>';
+ const graph=host.querySelector('#beat-map');
+ if(graph) {
+  if(beat.google) drawGoogleBeat(graph,nodes).catch(()=>{if(graph.isConnected) graph.textContent='Google map unavailable. Distances are listed below.';});
+  else drawCoordinateBeat(graph,nodes);
+ }
+}
+async function saveBeat() {
+ const draft=beatDraft;
+ if(!draft?.added.length||saving) return;
+ const kept=await save(w=>{
+  const ids=w.plans[day()]??=[];
+  for(const stop of draft.added) {
+   let id=stop.id;
+   if(!w.leads[id]) {
+    id=crypto.randomUUID();
+    w.leads[id]={id,name:'',area:'',category:stop.category,lat:null,lng:null,owner:'',phone:'',openedAt:null,googlePlaceId:stop.googlePlaceId};
+   }
+   if(!ids.includes(id)) ids.push(id);
+  }
+ },'Beat saved.');
+ if(kept) {
+  beatDraft=null;savedRoute={...draft,notice:''};
+  renderBeatPreview();
+ } else {
+  beatDraft=null;
+  renderBeatPreview();
+  setBeatStatus('The beat was not saved. Preview again to check availability.');
+ }
+}
+async function showSavedBeat(button) {
+ const host=document.querySelector('#beat-preview');
+ if(!host) return;
+ button.disabled=true;
+ setBeatStatus('Loading saved route…');
+ try {
+  const stops=await Promise.all(plan().map(async id=>{
+   const lead=data.leads[id];
+   if(!lead.googlePlaceId||!googleConfigured()) return lead;
+   try {
+    const place=await getGooglePlace(lead.googlePlaceId);
+    return {...lead,name:lead.name||place.name,lat:lead.lat??place.lat,lng:lead.lng??place.lng,googleRoute:true};
+   } catch {return lead;}
+  }));
+  if(!host.isConnected) return;
+  beatDraft=null;savedRoute={stops,start:locationMode==='live'?origin:null,label:'Your location',google:stops.some(lead=>lead.googleRoute)};
+  renderBeatPreview();
+  setBeatStatus('');
+ } finally {
+  button.disabled=false;
+ }
 }
 function visitPhoto(visit) {
  return visit?.hasPhoto?'<img class="visit-photo" loading="lazy" alt="Business photo from this visit" src="/api/visits/'+encodeURIComponent(visit.id)+'/photo">':'';
@@ -287,15 +432,16 @@ function reports() {
 function render() {
  mapCleanup();
  const [page,id]=(location.hash.slice(1)||'home').split('/');
- const active=page==='lead'?'leads':page;
+ const active=page==='lead'?'leads':beatRoute()?'beat':page;
  document.querySelector('#side').innerHTML='<div class="brand"><span class="tile logo">'+icon('compass')+'</span><div><strong>Disha</strong><small>Field sales workspace</small></div></div><p class="nav-label">WORKSPACE</p><nav aria-label="Workspace">'+nav.map(([route,label,i])=>'<button data-go="'+route+'" '+(active===route?'class="active" aria-current="page"':'')+'>'+icon(i)+label+'</button>').join('')+'</nav><div class="agent"><span class="avatar">'+initials()+'</span><div><strong>'+safe(user.name)+'</strong><small>Field Sales Executive</small></div></div>';
  document.querySelector('#top').innerHTML='<div><span>Workspace</span><strong>'+ (nav.find(x=>x[0]===active)?.[1]||'Home')+'</strong></div><div><span>'+icon('calendar')+' '+displayDate(day())+'</span><form method="post" action="/accounts/logout/"><input type="hidden" name="csrfmiddlewaretoken" value="'+safe(csrf)+'"><button class="btn" type="submit">Sign out</button></form></div>';
- const screens={home,discover:()=>listPage(true),plan:planner,leads:()=>listPage(false),learn:learning,reports,lead:()=>profile(id)};
+ const screens={home,beat:beatPage,discover:beatPage,plan:beatPage,leads:listPage,learn:learning,reports,lead:()=>profile(id)};
  main.innerHTML=(screens[page]||home)();
- if(page==='discover'||page==='leads') updateResults(page==='discover');
- if(page==='discover') {
+ if(page==='leads') updateResults();
+ if(beatRoute()) {
+  updateBeatLocation();
   if(!locationRequest) useCurrentLocation();
-  else scheduleDiscovery();
+  renderBeatPreview();
  }
  if(page==='lead') {
   loadPitchOptions(main.querySelector('[data-pitch-id]'),id);
@@ -347,44 +493,9 @@ async function save(change,message,quiz,attachment) {
   saving=false;
  }
 }
-function clearDiscovery() {
- clearTimeout(discoveryTimer);
- ++discoveryRequest;
- searched='';places=[];discoveryBusy=false;discoveryMessage='';
-}
-function scheduleDiscovery() {
- clearTimeout(discoveryTimer);
- if(location.hash==='#discover'&&locationMode==='live'&&googleConfigured()&&!searched) {
-  discoveryTimer=setTimeout(findPlaces,300);
- }
-}
-async function findPlaces() {
- if(location.hash!=='#discover'||locationMode!=='live'||!googleConfigured()||discoveryBusy) return;
- const current=++discoveryRequest;
- searched='started';discoveryBusy=true;discoveryMessage='';places=[];
- updateResults(true);
- try {
-  const result=await searchGoogle(origin,radius,category);
-  if(current!==discoveryRequest) return;
-  places=result.places;
-  discoveryMessage=result.failures.length?'Some categories could not load: '+result.failures.join(', ')+'.':places.length?'Google Maps results · up to 20 per category.':'Google Maps returned no businesses for this selection.';
- } catch(e) {
-  if(current===discoveryRequest) discoveryMessage=e.message;
- } finally {
-  if(current===discoveryRequest) {
-   discoveryBusy=false;
-   if(location.hash==='#discover') updateResults(true);
-  }
- }
-}
-function focusPlace(id) {
- const result=main.querySelector('[data-act="savePlace"][data-id="'+id+'"]');
- result?.scrollIntoView({block:'nearest'});
- result?.focus({preventScroll:true});
-}
 function navigate(go) {
  if(location.hash==='#'+go) return;
- clearDiscovery();tab='Overview';query='';category='All';location.hash=go;
+ tab='Overview';query='';category='All';location.hash=go;
 }
 const field=(label,html)=>'<label class="field">'+label+html+'</label>';
 const submit=(label)=>'<div class="foot-actions">'+btn('Cancel',{act:'dismiss'})+'<button class="btn primary" type="submit">'+label+'</button></div>';
@@ -441,28 +552,28 @@ document.addEventListener('click',e=>{
  const {go,act,id}=button.dataset;
  if(go) {navigate(go);return;}
  const actions={
-  locate:useCurrentLocation,discoverLive:findPlaces,
+  locate:useCurrentLocation,saveBeat,showSavedBeat:()=>showSavedBeat(button),
   loadPitchOptions:()=>loadPitchOptions(button.closest('[data-pitch-id]'),id),
   generatePitch:()=>readPitch(button.closest('[data-pitch-id]'),id,button),
   pitchLanguage:()=>changePitchLanguage(button,id),
-  savePlace:()=>{const place=places.find(x=>x.id===id);if(place) addLead(undefined,place);},
   fillPosition:()=>{const form=modal.querySelector('form');form.elements.lat.value=origin[0];form.elements.lng.value=origin[1];},
   add:()=>addLead(),editLead:()=>addLead(data.leads[id]),visit:()=>logVisit(id),dismiss:()=>modal.close(),lesson:()=>showLesson(id),
   planAdd:()=>save(w=>{const date=day();const ids=w.plans[date]??=[];if(!ids.includes(id)) ids.push(id);},'Added to today’s plan.'),
-  planAddSelected:()=>{const choice=document.querySelector('#planLead')?.value;if(choice) save(w=>{const ids=w.plans[planDate]??=[];if(!ids.includes(choice)) ids.push(choice);},'Stop added to plan.');},
-  planRemove:()=>save(w=>{w.plans[planDate]=(w.plans[planDate]||[]).filter(x=>x!==id);},'Removed from plan.'),
+  planRemove:async()=>{if(await save(w=>{w.plans[day()]=(w.plans[day()]||[]).filter(x=>x!==id);},'Removed from plan.')) {beatDraft=null;savedRoute=null;renderBeatPreview();}},
   openAccount:()=>dialog('Mark account opened',safe(nameOf(data.leads[id])),'<p>Record the account opening for today.</p>'+submit('Confirm opening'),()=>save(w=>{w.leads[id].openedAt=day();},'Account opening recorded.')),
-  category:()=>{if(category===id) return;category=id;clearDiscovery();for(const chip of main.querySelectorAll('[data-act="category"]')) {chip.classList.toggle('active',chip.dataset.id===id);chip.setAttribute('aria-pressed',String(chip.dataset.id===id));}updateResults(location.hash==='#discover');scheduleDiscovery();},profileTab:()=>{tab=id;render();},learnFilter:()=>{learnFilter=id;render();}
+  category:()=>{if(category===id) return;category=id;for(const chip of main.querySelectorAll('[data-act="category"]')) {chip.classList.toggle('active',chip.dataset.id===id);chip.setAttribute('aria-pressed',String(chip.dataset.id===id));}updateResults();},profileTab:()=>{tab=id;render();},learnFilter:()=>{learnFilter=id;render();}
  };
  actions[act]?.();
 });
-document.addEventListener('input',e=>{if(e.target.id==='search'){query=e.target.value;updateResults(location.hash==='#discover');}});
-document.addEventListener('change',e=>{
- if(e.target.matches('[data-pitch-product]')) updatePitchProduct(e.target.closest('[data-pitch-id]'),e.target.value);
- if(e.target.id==='radius'){radius=Number(e.target.value);clearDiscovery();updateResults(true);scheduleDiscovery();}
- if(e.target.id==='planDate'&&e.target.value){planDate=e.target.value;render();}
+document.addEventListener('submit',e=>{
+ if(e.target.id==='beat-form') {e.preventDefault();previewBeat(e.target);}
 });
-window.addEventListener('hashchange',()=>{clearDiscovery();render();window.scrollTo(0,0);});
+document.addEventListener('input',e=>{if(e.target.id==='search'){query=e.target.value;updateResults();}});
+document.addEventListener('change',e=>{
+ if(e.target.closest('#beat-form')) {beatDraft=null;savedRoute=null;renderBeatPreview();}
+ if(e.target.matches('[data-pitch-product]')) updatePitchProduct(e.target.closest('[data-pitch-id]'),e.target.value);
+});
+window.addEventListener('hashchange',()=>{render();window.scrollTo(0,0);});
 try {
  const [account,workspace,mapConfig]=await Promise.all([api('/api/session'),api('/api/workspace'),api('/api/maps-config')]);
  user=account;({data,revision}=workspace);configureGoogleMaps(mapConfig);
