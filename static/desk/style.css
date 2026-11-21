@@ -93,3 +93,24 @@
 @media (max-width: 650px) {
   .pitch-languages { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Phone layout is the default for pitch preparation. */
+.previsit-pitch { color: var(--ink); }
+.pitch-setup, .pitch-product { display: grid; gap: 12px; }
+.pitch-contact, .pitch-script { background: #fff; border-radius: 10px; padding: 12px; }
+.pitch-contact p, .pitch-script p, .pitch-product p { margin: 0; }
+.pitch-product label.field { margin: 0; }
+.pitch-product select, .pitch-product .btn, .pitch-switch .chip, .pitch-catalog summary { min-height: 44px; }
+.pitch-product select { font-size: 16px; }
+.pitch-product .btn { width: 100%; }
+.pitch-catalog summary { display: list-item; padding-block: 10px; color: var(--green); cursor: pointer; font-weight: 700; }
+.pitch-catalog ul { margin: 0 0 6px; padding-left: 22px; }
+.pitch-catalog li + li { margin-top: 10px; }
+.pitch-result:not(:empty) { margin-top: 16px; }
+.pitch-switch { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 8px 0; }
+.pitch-script { font-size: 17px; line-height: 1.65; overflow-wrap: anywhere; }
+.pitch-script[hidden] { display: none; }
+@media (min-width: 801px) {
+  .pitch-setup { grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); align-items: start; }
+  dialog .pitch-setup { grid-template-columns: minmax(0, 1fr); }
+}

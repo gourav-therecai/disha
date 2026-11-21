@@ -1,4 +1,5 @@
 import json
+from hashlib import sha256
 import re
 from datetime import date, timedelta
 from uuid import UUID
@@ -15,10 +16,10 @@ from django.utils import timezone
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_http_methods
 
-from .models import ACTIONS, CATEGORIES, LESSONS, RATINGS, Lead, LeadPitch, LessonCompletion, PlanStop, Visit, VisitPhoto, WorkspaceRevision
+from .models import ACTIONS, CATEGORIES, LESSONS, RATINGS, Lead, LeadPitch, LessonCompletion, PitchProduct, PlanStop, Visit, VisitPhoto, WorkspaceRevision
 
 from .photos import normalize_visit_photo
-from .pitches import PitchUnavailable, generate_pitch
+from .pitches import RECIPIENTS, PitchUnavailable, generate_pitch
 
 
 @login_required
@@ -269,6 +270,17 @@ def visit_photo(request, visit_id):
 
 
 
+@require_http_methods(["GET"])
+@never_cache
+def pitch_options(request, lead_id):
+    if not request.user.is_authenticated:
+        return error("Sign in to Disha.", 401)
+    lead = get_object_or_404(Lead, pk=lead_id, user=request.user)
+    primary, alternate = RECIPIENTS.get(lead.category, ("Business owner", "Accounts lead"))
+    products = list(PitchProduct.objects.filter(active=True).values("id", "name", "description"))
+    return JsonResponse({"primary": primary, "alternate": alternate, "products": products})
+
+
 @require_http_methods(["POST"])
 @never_cache
 def lead_pitch(request, lead_id):
@@ -277,14 +289,23 @@ def lead_pitch(request, lead_id):
     lead = get_object_or_404(Lead, pk=lead_id, user=request.user)
     if lead.category not in dict(CATEGORIES):
         return error("Select a valid category for this lead.", 400)
-    pitch = LeadPitch.objects.filter(lead=lead, category=lead.category).first()
+    try:
+        product_id = json.loads(request.body)["product_id"]
+        if type(product_id) is not int:
+            raise ValueError
+    except (ValueError, KeyError, TypeError):
+        return error("Select a product to pitch.", 400)
+    product = get_object_or_404(PitchProduct, pk=product_id, active=True)
+    revision = sha256(json.dumps([product.name, product.description]).encode()).hexdigest()
+    key = {"lead": lead, "category": lead.category, "product": product, "product_revision": revision}
+    pitch = LeadPitch.objects.filter(**key).first()
     if pitch and pitch.english and pitch.hindi:
         return JsonResponse({"english": pitch.english, "hindi": pitch.hindi})
     if not settings.OPENAI_API_KEY:
         return error("Add OPENAI_API_KEY to the server .env and restart Disha to generate pitches.", 503)
 
     if pitch is None:
-        pitch, _ = LeadPitch.objects.get_or_create(lead=lead, category=lead.category)
+        pitch, _ = LeadPitch.objects.get_or_create(**key)
     now = timezone.now()
     available = LeadPitch.objects.filter(pk=pitch.pk, english="", hindi="")
     claimed = available.filter(
@@ -296,7 +317,7 @@ def lead_pitch(request, lead_id):
             return JsonResponse({"english": pitch.english, "hindi": pitch.hindi})
         return error("A pitch request is already in progress or recently failed. Try again shortly.", 429)
     try:
-        result = generate_pitch(lead.category)
+        result = generate_pitch(lead.category, product, RECIPIENTS[lead.category][0])
     except PitchUnavailable:
         return error("OpenAI could not generate this pitch. Check the API key and quota, then try again.", 502)
     if not available.filter(requested_at=now).update(**result):

@@ -151,35 +151,62 @@ class WorkspaceTests(TestCase):
         self.assertEqual(other.get(url).status_code, 404)
         self.assertEqual(Client().get(url).status_code, 404)
 
-    def test_pitch_is_owner_scoped_and_reuses_generated_copy(self):
+    def test_pitch_options_are_private_and_list_only_active_products(self):
+        from .models import PitchProduct
+
+        state = self.state()
+        self.add_lead(state)
+        self.assertEqual(self.put(state).status_code, 200)
+        PitchProduct.objects.create(name="Hidden product", description="Internal", active=False)
+        url = f"/api/leads/{self.lead_id}/pitch-options"
+        result = self.client.get(url).json()
+        self.assertEqual(result["primary"], "Shop owner or proprietor")
+        self.assertEqual(len(result["products"]), 3)
+        self.assertNotIn("Hidden product", [product["name"] for product in result["products"]])
+        self.assertEqual(Client().get(url).status_code, 401)
+        other = Client()
+        other.force_login(get_user_model().objects.create_user("other-pitch-user"))
+        self.assertEqual(other.get(url).status_code, 404)
+        self.assertEqual(other.post(f"/api/leads/{self.lead_id}/pitch").status_code, 404)
+
+    def test_pitch_is_reused_for_same_product_and_refreshed_after_catalog_edit(self):
         from unittest.mock import patch
+
+        from .models import PitchProduct
 
         state = self.state()
         self.add_lead(state)
         self.assertEqual(self.put(state).status_code, 200)
         url = f"/api/leads/{self.lead_id}/pitch"
-        other = Client()
-        other.force_login(get_user_model().objects.create_user("other-pitch-user"))
-        self.assertEqual(other.post(url).status_code, 404)
-        self.assertEqual(Client().post(url).status_code, 401)
+        product, second, *_ = PitchProduct.objects.all()
         expected = {"english": "How do you receive payments?", "hindi": "आप भुगतान कैसे लेते हैं?"}
 
+        def request(item):
+            return self.client.post(url, {"product_id": item.pk}, content_type="application/json")
+
+        self.assertEqual(self.client.post(url, {}, content_type="application/json").status_code, 400)
         with self.settings(OPENAI_API_KEY=""), patch("desk.views.generate_pitch") as generate:
-            self.assertEqual(self.client.post(url).status_code, 503)
+            self.assertEqual(request(product).status_code, 503)
             generate.assert_not_called()
         with self.settings(OPENAI_API_KEY="test-only"), patch("desk.views.generate_pitch", return_value=expected) as generate:
-            self.assertEqual(self.client.post(url).json(), expected)
-            self.assertEqual(self.client.post(url).json(), expected)
-            generate.assert_called_once_with("Retail")
-        with self.settings(OPENAI_API_KEY=""):
-            self.assertEqual(self.client.post(url).json(), expected)
+            self.assertEqual(request(product).json(), expected)
+            self.assertEqual(request(product).json(), expected)
+            generate.assert_called_once_with("Retail", product, "Shop owner or proprietor")
+            self.assertEqual(request(second).json(), expected)
+            self.assertEqual(generate.call_count, 2)
+            product.description = "Updated catalog guidance"
+            product.save(update_fields=["description"])
+            self.assertEqual(request(product).json(), expected)
+            self.assertEqual(generate.call_count, 3)
 
-    def test_openai_pitch_request_and_response(self):
+    def test_openai_pitch_request_contains_selected_product_and_role(self):
         from io import BytesIO
         from unittest.mock import patch
 
+        from .models import PitchProduct
         from .pitches import generate_pitch
 
+        product = PitchProduct.objects.get(name="Merchant Payments")
         content = {"english": "How do you receive payments?", "hindi": "आप भुगतान कैसे लेते हैं?"}
         response = {"status": "completed", "output": [{
             "type": "message", "content": [{"type": "output_text", "text": json.dumps(content)}],
@@ -187,10 +214,13 @@ class WorkspaceTests(TestCase):
         with self.settings(OPENAI_API_KEY="test-only"), patch(
             "desk.pitches.urlopen", return_value=BytesIO(json.dumps(response).encode())
         ) as request:
-            self.assertEqual(generate_pitch("Retail"), content)
+            self.assertEqual(generate_pitch("Retail", product, "Shop owner"), content)
             args, kwargs = request.call_args
             self.assertEqual(kwargs["timeout"], 12)
             body = json.loads(args[0].data)
-            self.assertEqual(body["input"], "Business category: Retail")
+            self.assertEqual(json.loads(body["input"]), {
+                "business_category": "Retail", "suggested_role": "Shop owner",
+                "product": product.name, "product_description": product.description,
+            })
             self.assertFalse(body["store"])
             self.assertTrue(body["text"]["format"]["strict"])

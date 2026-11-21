@@ -83,12 +83,27 @@ class VisitPhoto(models.Model):
     image = models.BinaryField(editable=False)
 
 
+class PitchProduct(models.Model):
+    name = models.CharField(max_length=80, unique=True)
+    description = models.CharField(max_length=300)
+    active = models.BooleanField(default=True)
+    position = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ("position", "name")
+
+    def __str__(self):
+        return self.name
+
+
 class LeadPitch(models.Model):
     lead = models.ForeignKey(Lead, on_delete=models.CASCADE)
     category = models.CharField(max_length=20, choices=CATEGORIES)
+    product = models.ForeignKey(PitchProduct, null=True, on_delete=models.PROTECT)
+    product_revision = models.CharField(max_length=64, blank=True)
     english = models.CharField(max_length=600, blank=True)
     hindi = models.CharField(max_length=600, blank=True)
     requested_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=("lead", "category"), name="unique_lead_pitch_category")]
+        constraints = [models.UniqueConstraint(fields=("lead", "category", "product", "product_revision"), name="unique_pitch_product_revision")]

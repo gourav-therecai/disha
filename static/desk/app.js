@@ -177,27 +177,85 @@ function populateGoogleDetails(lead,id) {
   if(host.isConnected) host.textContent='Google listing details are temporarily unavailable.';
  });
 }
-const pendingPitches=new Map();
+const selectedProduct=new Map();
+const panelOptions=new WeakMap();
 function pitchPanel(id) {
- return '<section class="previsit-pitch" data-pitch-id="'+id+'"><h2>Pre-visit pitch</h2><div class="pitch-result" aria-live="polite"></div></section>';
+ return '<section class="previsit-pitch" data-pitch-id="'+id+'"><h2>Prepare your pitch</h2>'+
+  '<div class="pitch-setup" aria-busy="true">Loading products and suggested contact…</div>'+
+  '<div class="pitch-result" aria-live="polite"></div></section>';
 }
-function readPitch(host,id) {
+async function loadPitchOptions(host,id) {
  if(!host||!id) return;
- const result=host.querySelector('.pitch-result');
- result.textContent='Preparing your English and Hindi pitch…';
- if(!pendingPitches.has(id)) {
-  const request=api('/api/leads/'+encodeURIComponent(id)+'/pitch',{method:'POST',headers:{'X-CSRFToken':csrf}});
-  pendingPitches.set(id,request);
-  request.then(()=>pendingPitches.delete(id),()=>pendingPitches.delete(id));
+ const setup=host.querySelector('.pitch-setup');
+ try {
+  const options=await api('/api/leads/'+encodeURIComponent(id)+'/pitch-options');
+  if(!host.isConnected) return;
+  panelOptions.set(host,options.products);
+  const who='<div class="pitch-contact"><h3>Who to ask for</h3><p><strong>'+safe(options.primary)+
+   '</strong></p><p class="sub">If unavailable, ask for the '+safe(options.alternate.toLowerCase())+'.</p></div>';
+  if(!options.products.length) {
+   setup.innerHTML=who+'<p class="sub">There are no active products. Ask your administrator to add one.</p>';
+   return;
+  }
+  const choices=options.products.map(product=>'<option value="'+product.id+'">'+safe(product.name)+'</option>').join('');
+  const catalog=options.products.length>1?'<details class="pitch-catalog"><summary>View all '+options.products.length+
+   ' products</summary><ul>'+options.products.map(product=>'<li><strong>'+safe(product.name)+
+   '</strong><p>'+safe(product.description)+'</p></li>').join('')+'</ul></details>':'';
+  setup.innerHTML=who+'<div class="pitch-product"><label class="field">Product to pitch<select data-pitch-product>'+
+   choices+'</select></label><p class="sub" data-product-description></p>'+catalog+
+   btn('Generate pitch',{act:'generatePitch',id,extra:'primary'})+'</div>';
+  const select=setup.querySelector('[data-pitch-product]');
+  if(options.products.some(product=>String(product.id)===selectedProduct.get(id))) select.value=selectedProduct.get(id);
+  updatePitchProduct(host,select.value);
+ } catch(error) {
+  if(host.isConnected) setup.innerHTML='<p class="sub">'+safe(error.message)+'</p>'+btn('Reload products',{act:'loadPitchOptions',id});
+ } finally {
+  setup.setAttribute('aria-busy','false');
  }
- pendingPitches.get(id).then(pitch=>{
-  if(!host.isConnected||!result.isConnected) return;
-  result.innerHTML='<div class="pitch-languages"><div lang="en"><h3>English</h3><p>'+safe(pitch.english)+
-   '</p></div><div lang="hi"><h3>हिन्दी</h3><p>'+safe(pitch.hindi)+'</p></div></div>';
- }).catch(error=>{
-  if(!host.isConnected||!result.isConnected) return;
-  result.innerHTML='<p class="sub">'+safe(error.message)+'</p>'+btn('Retry pitch',{act:'retryPitch',id});
- });
+}
+function updatePitchProduct(host,value) {
+ const product=panelOptions.get(host)?.find(item=>String(item.id)===value);
+ if(!product) return;
+ const id=host.dataset.pitchId;
+ selectedProduct.set(id,value);
+ host.querySelector('[data-product-description]').textContent=product.description;
+ host.querySelector('.pitch-result').replaceChildren();
+}
+async function readPitch(host,id,button) {
+ const product=host?.querySelector('[data-pitch-product]');
+ if(!product||button.disabled) return;
+ const requested=product.value;
+ const result=host.querySelector('.pitch-result');
+ product.disabled=true;
+ button.disabled=true;
+ result.textContent='Preparing English and Hindi scripts…';
+ try {
+  const pitch=await api('/api/leads/'+encodeURIComponent(id)+'/pitch',{
+   method:'POST',headers:{'X-CSRFToken':csrf,'Content-Type':'application/json'},
+   body:JSON.stringify({product_id:Number(requested)})
+  });
+  if(!host.isConnected) return;
+  const title=product.options[product.selectedIndex].text;
+  result.innerHTML='<h3>'+safe(title)+'</h3><div class="pitch-switch" role="group" aria-label="Pitch language">'+
+   '<button type="button" class="chip active" aria-pressed="true" data-act="pitchLanguage" data-id="en">English</button>'+
+   '<button type="button" class="chip" aria-pressed="false" data-act="pitchLanguage" data-id="hi" lang="hi">हिन्दी</button></div>'+
+   '<div class="pitch-script" lang="en"><p>'+safe(pitch.english)+'</p></div>'+
+   '<div class="pitch-script" lang="hi" hidden><p>'+safe(pitch.hindi)+'</p></div>';
+ } catch(error) {
+  if(host.isConnected) result.textContent=error.message;
+ } finally {
+  product.disabled=false;
+  button.disabled=false;
+ }
+}
+function changePitchLanguage(button,language) {
+ const panel=button.closest('.pitch-result');
+ for(const option of panel.querySelectorAll('[data-act="pitchLanguage"]')) {
+  const active=option.dataset.id===language;
+  option.classList.toggle('active',active);
+  option.setAttribute('aria-pressed',String(active));
+ }
+ for(const script of panel.querySelectorAll('.pitch-script')) script.hidden=script.lang!==language;
 }
 function profile(id) {
  const lead=data.leads[id];
@@ -240,7 +298,7 @@ function render() {
   else scheduleDiscovery();
  }
  if(page==='lead') {
-  readPitch(main.querySelector('[data-pitch-id]'),id);
+  loadPitchOptions(main.querySelector('[data-pitch-id]'),id);
   populateGoogleDetails(data.leads[id],id);
  }
  if(page==='home') mapCleanup=mountMap(document.querySelector('#map'),nearbyLeads(),icon,{origin,labelText:locationLabel(),mini:true,radius});
@@ -368,7 +426,7 @@ function logVisit(id) {
  if(file?.size>5*1024*1024) {modal.querySelector('.form-error').textContent='Choose a photo that is 5 MB or smaller.';return;}
  save(w=>closeVisit(w,visit),'Visit saved.',undefined,file?.size?{file,visitId:visit.id}:undefined);
  });
- readPitch(modal.querySelector('[data-pitch-id]'),id);
+ loadPitchOptions(modal.querySelector('[data-pitch-id]'),id);
 }
 function showLesson(id) {
  const [,,title,note,,body,question,answers,correct]=lessons.find(l=>l[0]===id);
@@ -384,7 +442,9 @@ document.addEventListener('click',e=>{
  if(go) {navigate(go);return;}
  const actions={
   locate:useCurrentLocation,discoverLive:findPlaces,
-  retryPitch:()=>readPitch(button.closest('[data-pitch-id]'),id),
+  loadPitchOptions:()=>loadPitchOptions(button.closest('[data-pitch-id]'),id),
+  generatePitch:()=>readPitch(button.closest('[data-pitch-id]'),id,button),
+  pitchLanguage:()=>changePitchLanguage(button,id),
   savePlace:()=>{const place=places.find(x=>x.id===id);if(place) addLead(undefined,place);},
   fillPosition:()=>{const form=modal.querySelector('form');form.elements.lat.value=origin[0];form.elements.lng.value=origin[1];},
   add:()=>addLead(),editLead:()=>addLead(data.leads[id]),visit:()=>logVisit(id),dismiss:()=>modal.close(),lesson:()=>showLesson(id),
@@ -398,6 +458,7 @@ document.addEventListener('click',e=>{
 });
 document.addEventListener('input',e=>{if(e.target.id==='search'){query=e.target.value;updateResults(location.hash==='#discover');}});
 document.addEventListener('change',e=>{
+ if(e.target.matches('[data-pitch-product]')) updatePitchProduct(e.target.closest('[data-pitch-id]'),e.target.value);
  if(e.target.id==='radius'){radius=Number(e.target.value);clearDiscovery();updateResults(true);scheduleDiscovery();}
  if(e.target.id==='planDate'&&e.target.value){planDate=e.target.value;render();}
 });
